@@ -42,9 +42,9 @@ func TestOpenSCADDifferential(t *testing.T) {
 		expression string
 		mesh       *model3d.Mesh
 	}{
-		{"union", "union", Union(a, b)},
-		{"intersection", "intersection", Intersection(a, b)},
-		{"difference", "difference", Difference(a, b)},
+		{"union", "union", mustUnion3D(t, a, b)},
+		{"intersection", "intersection", mustIntersection3D(t, a, b)},
+		{"difference", "difference", mustDifference3D(t, a, b)},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

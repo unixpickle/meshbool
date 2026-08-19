@@ -97,120 +97,54 @@ func (t *TopologyError) Error() string {
 }
 
 // Union computes the union of zero or more meshes.
-func Union(meshes ...*model.Mesh) *model.Mesh {
+func Union(meshes ...*model.Mesh) (*model.Mesh, error) {
 	return UnionWithOptions(DefaultOptions(), meshes...)
 }
 
-// UnionWithOptions computes a union with configurable safety limits. It
-// panics on complexity or topology failure.
-func UnionWithOptions(options Options, meshes ...*model.Mesh) *model.Mesh {
-	result, err := UnionCheckedWithOptions(options, meshes...)
-	if err != nil {
-		panic(err)
-	}
-	return result
-}
-
-// UnionChecked is like Union, but reports complexity and output-topology
-// failures as errors.
-func UnionChecked(meshes ...*model.Mesh) (result *model.Mesh, err error) {
-	return UnionCheckedWithOptions(DefaultOptions(), meshes...)
-}
-
-// UnionCheckedWithOptions is like UnionWithOptions, but returns complexity,
-// topology, and invalid-option failures as errors.
-func UnionCheckedWithOptions(options Options, meshes ...*model.Mesh) (result *model.Mesh, err error) {
-	options, err = normalizeOptions(options)
+// UnionWithOptions computes a union with configurable safety limits.
+func UnionWithOptions(options Options, meshes ...*model.Mesh) (*model.Mesh, error) {
+	options, err := normalizeOptions(options)
 	if err != nil {
 		return nil, err
 	}
-	defer recoverComplexity(&err)
-	return boolean(options, booleanUnion, meshes), nil
+	return boolean(options, booleanUnion, meshes)
 }
 
 // Intersection computes the intersection of zero or more meshes. With no
 // arguments, it returns an empty mesh.
-func Intersection(meshes ...*model.Mesh) *model.Mesh {
+func Intersection(meshes ...*model.Mesh) (*model.Mesh, error) {
 	return IntersectionWithOptions(DefaultOptions(), meshes...)
 }
 
 // IntersectionWithOptions computes an intersection with configurable safety
-// limits. It panics on complexity or topology failure.
-func IntersectionWithOptions(options Options, meshes ...*model.Mesh) *model.Mesh {
-	result, err := IntersectionCheckedWithOptions(options, meshes...)
-	if err != nil {
-		panic(err)
-	}
-	return result
-}
-
-// IntersectionChecked is like Intersection, but reports complexity and
-// output-topology failures as errors.
-func IntersectionChecked(meshes ...*model.Mesh) (result *model.Mesh, err error) {
-	return IntersectionCheckedWithOptions(DefaultOptions(), meshes...)
-}
-
-// IntersectionCheckedWithOptions is like IntersectionWithOptions, but returns
-// complexity, topology, and invalid-option failures as errors.
-func IntersectionCheckedWithOptions(options Options, meshes ...*model.Mesh) (result *model.Mesh, err error) {
-	options, err = normalizeOptions(options)
+// limits.
+func IntersectionWithOptions(options Options, meshes ...*model.Mesh) (*model.Mesh, error) {
+	options, err := normalizeOptions(options)
 	if err != nil {
 		return nil, err
 	}
-	defer recoverComplexity(&err)
-	return boolean(options, booleanIntersection, meshes), nil
+	return boolean(options, booleanIntersection, meshes)
 }
 
 // Difference subtracts every mesh in subtract from the first mesh.
-func Difference(first *model.Mesh, subtract ...*model.Mesh) *model.Mesh {
+func Difference(first *model.Mesh, subtract ...*model.Mesh) (*model.Mesh, error) {
 	return DifferenceWithOptions(DefaultOptions(), first, subtract...)
 }
 
 // DifferenceWithOptions computes a difference with configurable safety
-// limits. It panics on complexity or topology failure.
-func DifferenceWithOptions(options Options, first *model.Mesh, subtract ...*model.Mesh) *model.Mesh {
-	result, err := DifferenceCheckedWithOptions(options, first, subtract...)
-	if err != nil {
-		panic(err)
-	}
-	return result
-}
-
-// DifferenceChecked is like Difference, but reports complexity and
-// output-topology failures as errors.
-func DifferenceChecked(first *model.Mesh, subtract ...*model.Mesh) (result *model.Mesh, err error) {
-	return DifferenceCheckedWithOptions(DefaultOptions(), first, subtract...)
-}
-
-// DifferenceCheckedWithOptions is like DifferenceWithOptions, but returns
-// complexity, topology, and invalid-option failures as errors.
-func DifferenceCheckedWithOptions(options Options, first *model.Mesh, subtract ...*model.Mesh) (result *model.Mesh, err error) {
-	options, err = normalizeOptions(options)
+// limits.
+func DifferenceWithOptions(options Options, first *model.Mesh, subtract ...*model.Mesh) (*model.Mesh, error) {
+	options, err := normalizeOptions(options)
 	if err != nil {
 		return nil, err
 	}
-	defer recoverComplexity(&err)
 	if first == nil {
 		return model.NewMesh(), nil
 	}
 	meshes := make([]*model.Mesh, 1, 1+len(subtract))
 	meshes[0] = first
 	meshes = append(meshes, subtract...)
-	return boolean(options, booleanDifference, meshes), nil
-}
-
-func recoverComplexity(err *error) {
-	if value := recover(); value != nil {
-		switch failure := value.(type) {
-		case *ComplexityError:
-			*err = failure
-			return
-		case *TopologyError:
-			*err = failure
-			return
-		}
-		panic(value)
-	}
+	return boolean(options, booleanDifference, meshes)
 }
 
 type booleanKind int
@@ -230,32 +164,38 @@ type atomicSegment struct {
 	p [2]model.Coord
 }
 
-func boolean(options Options, kind booleanKind, meshes []*model.Mesh) *model.Mesh {
+func boolean(options Options, kind booleanKind, meshes []*model.Mesh) (*model.Mesh, error) {
 	meshes = nonNilMeshes(meshes)
 	if len(meshes) == 0 {
-		return model.NewMesh()
+		return model.NewMesh(), nil
 	}
 
 	totalSegments := 0
 	for _, mesh := range meshes {
 		totalSegments += mesh.NumSegments()
 		if totalSegments > options.MaxInputSegments {
-			panic(&ComplexityError{Stage: "input segments", Limit: options.MaxInputSegments})
+			return nil, &ComplexityError{Stage: "input segments", Limit: options.MaxInputSegments}
 		}
 	}
 	segments := collectSegments(meshes)
 	if len(segments) == 0 {
-		return model.NewMesh()
+		return model.NewMesh(), nil
 	}
 	if center, ok := normalizationCenter(segments); ok {
 		local := make([]*model.Mesh, len(meshes))
 		for i, mesh := range meshes {
 			local[i] = mesh.Translate(center.Scale(-1))
 		}
-		return boolean(options, kind, local).Translate(center)
+		result, err := boolean(options, kind, local)
+		if err != nil {
+			return nil, err
+		}
+		return result.Translate(center), nil
 	}
 	tol := meshTolerance(segments)
-	splitSegments(options, segments, tol)
+	if err := splitSegments(options, segments, tol); err != nil {
+		return nil, err
+	}
 	atoms := atomicSegments(segments, tol)
 	classifiers := make([]pointClassifier, len(meshes))
 	for i, m := range meshes {
@@ -276,8 +216,14 @@ func boolean(options Options, kind booleanKind, meshes []*model.Mesh) *model.Mes
 		// Keep probes within the local edge neighborhood, but never force an
 		// ordinary short edge's probe below the operation tolerance.
 		offset = math.Min(offset, length*0.25)
-		right := evalBoolean(kind, classifiers, mid.Add(rightUnit.Scale(offset)))
-		left := evalBoolean(kind, classifiers, mid.Sub(rightUnit.Scale(offset)))
+		right, err := evalBoolean(kind, classifiers, mid.Add(rightUnit.Scale(offset)))
+		if err != nil {
+			return nil, err
+		}
+		left, err := evalBoolean(kind, classifiers, mid.Sub(rightUnit.Scale(offset)))
+		if err != nil {
+			return nil, err
+		}
 		if right == left {
 			continue
 		}
@@ -287,16 +233,19 @@ func boolean(options Options, kind booleanKind, meshes []*model.Mesh) *model.Mes
 			result.Add(&model.Segment{b, a})
 		}
 	}
-	result = regularizePointContacts(options, result, tol)
+	result, err := regularizePointContacts(options, result, tol)
+	if err != nil {
+		return nil, err
+	}
 	return validateResultTopology(options, result)
 }
 
-func validateResultTopology(options Options, mesh *model.Mesh) *model.Mesh {
+func validateResultTopology(options Options, mesh *model.Mesh) (*model.Mesh, error) {
 	if !mesh.Manifold() {
-		panic(&TopologyError{Problem: "vertices do not each have two incident segments"})
+		return nil, &TopologyError{Problem: "vertices do not each have two incident segments"}
 	}
 	if inconsistent := mesh.InconsistentVertices(); len(inconsistent) != 0 {
-		panic(&TopologyError{Problem: "inconsistent segment orientation", Count: len(inconsistent)})
+		return nil, &TopologyError{Problem: "inconsistent segment orientation", Count: len(inconsistent)}
 	}
 	type boundedSegment struct {
 		segment  *model.Segment
@@ -330,15 +279,15 @@ func validateResultTopology(options Options, mesh *model.Mesh) *model.Mesh {
 			}
 			pairs++
 			if pairs > options.MaxIntersectionPairs {
-				panic(&ComplexityError{Stage: "output validation candidate pairs", Limit: options.MaxIntersectionPairs})
+				return nil, &ComplexityError{Stage: "output validation candidate pairs", Limit: options.MaxIntersectionPairs}
 			}
 			if invalidSegmentIntersection(candidate.segment, current.segment) {
-				panic(&TopologyError{Problem: "crossing or overlapping output segments"})
+				return nil, &TopologyError{Problem: "crossing or overlapping output segments"}
 			}
 		}
 		active = append(remaining, current)
 	}
-	return mesh
+	return mesh, nil
 }
 
 func invalidSegmentIntersection(a, b *model.Segment) bool {
@@ -379,10 +328,10 @@ func invalidSegmentIntersection(a, b *model.Segment) bool {
 // point. Such a contact has four or more incident segments and therefore
 // cannot be represented as a manifold model.Mesh, whose connectivity is
 // determined solely by coordinate equality.
-func regularizePointContacts(options Options, mesh *model.Mesh, tol float64) *model.Mesh {
+func regularizePointContacts(options Options, mesh *model.Mesh, tol float64) (*model.Mesh, error) {
 	segments := mesh.SegmentSlice()
 	if len(segments) == 0 || mesh.Manifold() {
-		return mesh
+		return mesh, nil
 	}
 	sort.Slice(segments, func(i, j int) bool {
 		a := orderedSegmentKey(segments[i][0], segments[i][1])
@@ -419,7 +368,7 @@ func regularizePointContacts(options Options, mesh *model.Mesh, tol float64) *mo
 			continue
 		}
 		if len(incoming) > options.MaxContactDegree {
-			panic(&ComplexityError{Stage: "loops at one contact point", Limit: options.MaxContactDegree})
+			return nil, &ComplexityError{Stage: "loops at one contact point", Limit: options.MaxContactDegree}
 		}
 		assignment := matchContactEdges(segments, point, incoming, outgoing)
 		directions := make([]model.Coord, len(incoming))
@@ -455,7 +404,7 @@ func regularizePointContacts(options Options, mesh *model.Mesh, tol float64) *mo
 		}
 	}
 	if len(replacements) == 0 {
-		return mesh
+		return mesh, nil
 	}
 	result := model.NewMesh()
 	for i, segment := range segments {
@@ -467,7 +416,7 @@ func regularizePointContacts(options Options, mesh *model.Mesh, tol float64) *mo
 		}
 		result.Add(&copy)
 	}
-	return result
+	return result, nil
 }
 
 // matchContactEdges returns the outgoing edge paired with each incoming edge.
@@ -590,7 +539,7 @@ func meshTolerance(segments []*sourceSegment) float64 {
 	return math.Max(math.Max(scale*1e-10, ulp*16), math.SmallestNonzeroFloat64*1024)
 }
 
-func splitSegments(options Options, segments []*sourceSegment, tol float64) {
+func splitSegments(options Options, segments []*sourceSegment, tol float64) error {
 	type boundedSegment struct {
 		segment  *sourceSegment
 		min, max model.Coord
@@ -621,7 +570,7 @@ func splitSegments(options Options, segments []*sourceSegment, tol float64) {
 		for _, candidate := range active {
 			totalPairs++
 			if totalPairs > options.MaxIntersectionPairs {
-				panic(&ComplexityError{Stage: "intersection candidate pairs", Limit: options.MaxIntersectionPairs})
+				return &ComplexityError{Stage: "intersection candidate pairs", Limit: options.MaxIntersectionPairs}
 			}
 			if candidate.max.X+tol < current.min.X {
 				continue
@@ -634,11 +583,12 @@ func splitSegments(options Options, segments []*sourceSegment, tol float64) {
 			addIntersections(current.segment, candidate.segment, tol)
 			totalCuts += len(current.segment.cuts) + len(candidate.segment.cuts) - before
 			if totalCuts > options.MaxIntersectionCuts {
-				panic(&ComplexityError{Stage: "intersection cuts", Limit: options.MaxIntersectionCuts})
+				return &ComplexityError{Stage: "intersection cuts", Limit: options.MaxIntersectionCuts}
 			}
 		}
 		active = append(remaining, current)
 	}
+	return nil
 }
 
 func addIntersections(a, b *sourceSegment, tol float64) {
@@ -844,34 +794,34 @@ func (p *classifierNode) countRayCrossings(point model.Coord, result *int) {
 	}
 }
 
-func evalBoolean(kind booleanKind, classifiers []pointClassifier, p model.Coord) bool {
+func evalBoolean(kind booleanKind, classifiers []pointClassifier, p model.Coord) (bool, error) {
 	switch kind {
 	case booleanUnion:
 		for _, c := range classifiers {
 			if c.contains(p) {
-				return true
+				return true, nil
 			}
 		}
-		return false
+		return false, nil
 	case booleanIntersection:
 		for _, c := range classifiers {
 			if !c.contains(p) {
-				return false
+				return false, nil
 			}
 		}
-		return true
+		return true, nil
 	case booleanDifference:
 		if !classifiers[0].contains(p) {
-			return false
+			return false, nil
 		}
 		for _, c := range classifiers[1:] {
 			if c.contains(p) {
-				return false
+				return false, nil
 			}
 		}
-		return true
+		return true, nil
 	default:
-		panic("unknown boolean operation")
+		return false, fmt.Errorf("meshbool/bool2d: unknown boolean operation %d", kind)
 	}
 }
 

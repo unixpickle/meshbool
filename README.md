@@ -14,9 +14,18 @@ import (
 a := model3d.NewMeshRect(model3d.XYZ(0, 0, 0), model3d.XYZ(2, 2, 2))
 b := model3d.NewMeshRect(model3d.XYZ(1, 1, 1), model3d.XYZ(3, 3, 3))
 
-u := meshbool.Union(a, b)
-i := meshbool.Intersection(a, b)
-d := meshbool.Difference(a, b)
+u, err := meshbool.Union(a, b)
+if err != nil {
+    return err
+}
+i, err := meshbool.Intersection(a, b)
+if err != nil {
+    return err
+}
+d, err := meshbool.Difference(a, b)
+if err != nil {
+    return err
+}
 ```
 
 The corresponding planar API is in `github.com/unixpickle/meshbool/bool2d`
@@ -32,13 +41,10 @@ separate contacting components by a few scale-relative tolerance units.
 ## Resource limits
 
 Intersection arrangements can have output size quadratic or worse in the input
-size. The convenience functions stop at conservative internal expansion limits
-and panic with `*meshbool.ComplexityError` rather than risking unbounded memory
-growth. Servers and other long-running programs should use `UnionChecked`,
-`IntersectionChecked`, and `DifferenceChecked`. They return complexity failures
-and any residual invalid-output condition (`*meshbool.TopologyError`) as errors
-instead of returning a bad mesh. The planar package provides the same checked
-variants and error types.
+size. Every operation stops at conservative internal expansion limits and
+returns `*meshbool.ComplexityError` rather than risking unbounded memory growth.
+Residual invalid-output conditions are returned as `*meshbool.TopologyError`.
+The planar package provides the same error types.
 
 The implementation is single-threaded. This makes its cost predictable and
 avoids multiplying peak memory use when several facets create dense
@@ -53,7 +59,7 @@ options := meshbool.DefaultOptions()
 options.MaxInputTriangles = 500_000
 options.MaxOutputTriangles = 500_000
 
-result, err := meshbool.UnionCheckedWithOptions(options, a, b)
+result, err := meshbool.UnionWithOptions(options, a, b)
 ```
 
 Zero-valued option fields inherit defaults; negative values are rejected. The
@@ -69,7 +75,7 @@ MESHBOOL_STRESS_TRIALS=100 go test -run TestBooleanIdentitiesIcospheres
 ```
 
 Choose that value according to the machine's available time and memory; the
-checked APIs and internal expansion limits still apply.
+error-returning APIs and internal expansion limits still apply.
 
 If OpenSCAD is installed, a small fixed-seed differential check is available
 separately. Each external render has a 20-second timeout:

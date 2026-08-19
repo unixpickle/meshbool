@@ -8,6 +8,33 @@ import (
 	model "github.com/unixpickle/model3d/model2d"
 )
 
+func mustUnion2D(t testing.TB, meshes ...*model.Mesh) *model.Mesh {
+	t.Helper()
+	result, err := Union(meshes...)
+	if err != nil {
+		t.Fatalf("Union failed: %v", err)
+	}
+	return result
+}
+
+func mustIntersection2D(t testing.TB, meshes ...*model.Mesh) *model.Mesh {
+	t.Helper()
+	result, err := Intersection(meshes...)
+	if err != nil {
+		t.Fatalf("Intersection failed: %v", err)
+	}
+	return result
+}
+
+func mustDifference2D(t testing.TB, first *model.Mesh, subtract ...*model.Mesh) *model.Mesh {
+	t.Helper()
+	result, err := Difference(first, subtract...)
+	if err != nil {
+		t.Fatalf("Difference failed: %v", err)
+	}
+	return result
+}
+
 func TestRectBooleans(t *testing.T) {
 	a := model.NewMeshRect(model.XY(0, 0), model.XY(2, 2))
 	b := model.NewMeshRect(model.XY(1, 1), model.XY(3, 3))
@@ -16,9 +43,9 @@ func TestRectBooleans(t *testing.T) {
 		mesh *model.Mesh
 		area float64
 	}{
-		{"union", Union(a, b), 7},
-		{"intersection", Intersection(a, b), 1},
-		{"difference", Difference(a, b), 3},
+		{"union", mustUnion2D(t, a, b), 7},
+		{"intersection", mustIntersection2D(t, a, b), 1},
+		{"difference", mustDifference2D(t, a, b), 3},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -42,14 +69,14 @@ func TestCoincidentAndTouching(t *testing.T) {
 		segments int
 		manifold bool
 	}{
-		{"same union", Union(a, same), 1, 4, true},
-		{"same intersection", Intersection(a, same), 1, 4, true},
-		{"same difference", Difference(a, same), 0, 0, true},
-		{"edge union", Union(a, touchEdge), 2, 6, true},
-		{"edge intersection", Intersection(a, touchEdge), 0, 0, true},
-		{"edge difference", Difference(a, touchEdge), 1, 4, true},
-		{"point union", Union(a, touchPoint), 2, 8, true},
-		{"point intersection", Intersection(a, touchPoint), 0, 0, true},
+		{"same union", mustUnion2D(t, a, same), 1, 4, true},
+		{"same intersection", mustIntersection2D(t, a, same), 1, 4, true},
+		{"same difference", mustDifference2D(t, a, same), 0, 0, true},
+		{"edge union", mustUnion2D(t, a, touchEdge), 2, 6, true},
+		{"edge intersection", mustIntersection2D(t, a, touchEdge), 0, 0, true},
+		{"edge difference", mustDifference2D(t, a, touchEdge), 1, 4, true},
+		{"point union", mustUnion2D(t, a, touchPoint), 2, 8, true},
+		{"point intersection", mustIntersection2D(t, a, touchPoint), 0, 0, true},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -71,7 +98,7 @@ func TestCoincidentAndTouching(t *testing.T) {
 func TestNestedDifferenceCreatesHole(t *testing.T) {
 	outer := model.NewMeshRect(model.XY(-2, -2), model.XY(2, 2))
 	inner := model.NewMeshRect(model.XY(-1, -1), model.XY(1, 1))
-	result := Difference(outer, inner)
+	result := mustDifference2D(t, outer, inner)
 	assertValidMesh(t, result)
 	if actual := result.Area(); math.Abs(actual-12) > 1e-8 {
 		t.Fatalf("area: got %g want 12", actual)
@@ -90,7 +117,7 @@ func TestPointTangentHole(t *testing.T) {
 	for i, point := range points {
 		inner.Add(&model.Segment{point, points[(i+1)%len(points)]})
 	}
-	result := Difference(outer, inner)
+	result := mustDifference2D(t, outer, inner)
 	assertValidMesh(t, result)
 	if got := result.Area(); math.Abs(got-14) > 1e-8 {
 		t.Fatalf("area: got %g want 14", got)
@@ -103,7 +130,7 @@ func TestMultiplePointContacts(t *testing.T) {
 		model.NewMeshRect(model.XY(1, 1), model.XY(2, 2)),
 		model.NewMeshRect(model.XY(2, 2), model.XY(3, 3)),
 	}
-	result := Union(meshes...)
+	result := mustUnion2D(t, meshes...)
 	assertValidMesh(t, result)
 	if got := result.Area(); math.Abs(got-3) > 1e-8 {
 		t.Fatalf("area: got %g want 3", got)
@@ -126,7 +153,7 @@ func TestHighDegreePointContact(t *testing.T) {
 			meshes[i].Add(&model.Segment{point, points[(j+1)%len(points)]})
 		}
 	}
-	result := Union(meshes...)
+	result := mustUnion2D(t, meshes...)
 	assertValidMesh(t, result)
 	want := count * math.Sin(2*halfWidth) / 2
 	if got := result.Area(); math.Abs(got-want) > 1e-7 {
@@ -138,14 +165,15 @@ func TestCollinearPartialOverlap(t *testing.T) {
 	a := model.NewMeshRect(model.XY(0, 0), model.XY(3, 1))
 	b := model.NewMeshRect(model.XY(1, 0), model.XY(2, 2))
 	for name, result := range map[string]*model.Mesh{
-		"union": Union(a, b), "intersection": Intersection(a, b), "difference": Difference(a, b),
+		"union": mustUnion2D(t, a, b), "intersection": mustIntersection2D(t, a, b),
+		"difference": mustDifference2D(t, a, b),
 	} {
 		t.Run(name, func(t *testing.T) { assertValidMesh(t, result) })
 	}
-	if got := Union(a, b).Area(); math.Abs(got-4) > 1e-8 {
+	if got := mustUnion2D(t, a, b).Area(); math.Abs(got-4) > 1e-8 {
 		t.Fatalf("union area: %g", got)
 	}
-	if got := Intersection(a, b).Area(); math.Abs(got-1) > 1e-8 {
+	if got := mustIntersection2D(t, a, b).Area(); math.Abs(got-1) > 1e-8 {
 		t.Fatalf("intersection area: %g", got)
 	}
 }
@@ -154,7 +182,7 @@ func TestLargeCoordinateOffset(t *testing.T) {
 	base := 1e12
 	a := model.NewMeshRect(model.XY(base, base), model.XY(base+10, base+10))
 	b := model.NewMeshRect(model.XY(base+5, base+5), model.XY(base+15, base+15))
-	result := Union(a, b)
+	result := mustUnion2D(t, a, b)
 	assertValidMesh(t, result)
 	// Translate before measuring area to avoid cancellation in the model3d
 	// helper itself becoming part of this boolean regression.
@@ -168,7 +196,7 @@ func TestSmallCoordinateScale(t *testing.T) {
 	scale := 1e-9
 	a := model.NewMeshRect(model.XY(0, 0), model.XY(2*scale, 2*scale))
 	b := model.NewMeshRect(model.XY(scale, scale), model.XY(3*scale, 3*scale))
-	result := Union(a, b)
+	result := mustUnion2D(t, a, b)
 	assertValidMesh(t, result)
 	if area := result.Area(); math.Abs(area-7*scale*scale) > 1e-30 {
 		t.Fatalf("small-scale area: got %g want %g", area, 7*scale*scale)
@@ -179,12 +207,12 @@ func TestThinOverlap(t *testing.T) {
 	thickness := 1e-7
 	a := model.NewMeshRect(model.XY(0, 0), model.XY(1, 1))
 	b := model.NewMeshRect(model.XY(1-thickness, 0), model.XY(2, 1))
-	intersection := Intersection(a, b)
+	intersection := mustIntersection2D(t, a, b)
 	assertValidMesh(t, intersection)
 	if area := intersection.Area(); math.Abs(area-thickness) > 1e-12 {
 		t.Fatalf("thin intersection area: got %g want %g", area, thickness)
 	}
-	difference := Difference(a, b)
+	difference := mustDifference2D(t, a, b)
 	assertValidMesh(t, difference)
 	if area := difference.Area(); math.Abs(area-(1-thickness)) > 1e-12 {
 		t.Fatalf("thin difference area: got %g want %g", area, 1-thickness)
@@ -197,7 +225,8 @@ func TestRandomRaggedPolygons(t *testing.T) {
 		a := randomRadialMesh(rng, model.XY(-0.2, 0), 31)
 		b := randomRadialMesh(rng, model.XY(0.2, 0), 37)
 		for name, result := range map[string]*model.Mesh{
-			"union": Union(a, b), "intersection": Intersection(a, b), "difference": Difference(a, b),
+			"union": mustUnion2D(t, a, b), "intersection": mustIntersection2D(t, a, b),
+			"difference": mustDifference2D(t, a, b),
 		} {
 			assertValidMesh(t, result)
 			if math.IsNaN(result.Area()) || result.Area() < -1e-9 {
@@ -212,7 +241,7 @@ func TestBooleanIdentitiesRandom(t *testing.T) {
 	for trial := 0; trial < 100; trial++ {
 		a := randomRadialMesh(rng, model.XY(-0.1, 0), 13+rng.Intn(20))
 		b := randomRadialMesh(rng, model.XY(0.1, 0), 13+rng.Intn(20))
-		u, i, d := Union(a, b), Intersection(a, b), Difference(a, b)
+		u, i, d := mustUnion2D(t, a, b), mustIntersection2D(t, a, b), mustDifference2D(t, a, b)
 		wantUnion := a.Area() + b.Area() - i.Area()
 		if math.Abs(u.Area()-wantUnion) > 1e-7 {
 			t.Fatalf("trial %d: inclusion-exclusion: union=%g want=%g", trial, u.Area(), wantUnion)
@@ -225,21 +254,22 @@ func TestBooleanIdentitiesRandom(t *testing.T) {
 
 func TestNilAndEmptyInputs(t *testing.T) {
 	a := model.NewMeshRect(model.XY(0, 0), model.XY(1, 1))
-	if Union().NumSegments() != 0 || Intersection().NumSegments() != 0 || Difference(nil, a).NumSegments() != 0 {
+	if mustUnion2D(t).NumSegments() != 0 || mustIntersection2D(t).NumSegments() != 0 ||
+		mustDifference2D(t, nil, a).NumSegments() != 0 {
 		t.Fatal("zero-input operation was not empty")
 	}
-	if got := Difference(a).Area(); math.Abs(got-1) > 1e-8 {
+	if got := mustDifference2D(t, a).Area(); math.Abs(got-1) > 1e-8 {
 		t.Fatalf("identity difference area: %g", got)
 	}
 }
 
-func TestCheckedAPIs(t *testing.T) {
+func TestErrorReturningAPIs(t *testing.T) {
 	a := model.NewMeshRect(model.XY(0, 0), model.XY(1, 1))
 	b := model.NewMeshRect(model.XY(0.5, 0.5), model.XY(1.5, 1.5))
 	for name, operation := range map[string]func() (*model.Mesh, error){
-		"union":        func() (*model.Mesh, error) { return UnionChecked(a, b) },
-		"intersection": func() (*model.Mesh, error) { return IntersectionChecked(a, b) },
-		"difference":   func() (*model.Mesh, error) { return DifferenceChecked(a, b) },
+		"union":        func() (*model.Mesh, error) { return Union(a, b) },
+		"intersection": func() (*model.Mesh, error) { return Intersection(a, b) },
+		"difference":   func() (*model.Mesh, error) { return Difference(a, b) },
 	} {
 		t.Run(name, func(t *testing.T) {
 			result, err := operation()
@@ -258,7 +288,7 @@ func TestOptions(t *testing.T) {
 	}
 	a := model.NewMeshRect(model.XY(0, 0), model.XY(1, 1))
 	b := model.NewMeshRect(model.XY(0.5, 0.5), model.XY(1.5, 1.5))
-	result, err := UnionCheckedWithOptions(Options{}, a, b)
+	result, err := UnionWithOptions(Options{}, a, b)
 	if err != nil {
 		t.Fatalf("zero options did not use defaults: %v", err)
 	}
@@ -266,7 +296,7 @@ func TestOptions(t *testing.T) {
 
 	limited := DefaultOptions()
 	limited.MaxInputSegments = a.NumSegments() - 1
-	result, err = UnionCheckedWithOptions(limited, a)
+	result, err = UnionWithOptions(limited, a)
 	if result != nil {
 		t.Fatal("limited operation returned a mesh")
 	}
@@ -277,20 +307,20 @@ func TestOptions(t *testing.T) {
 
 	invalid := DefaultOptions()
 	invalid.MaxIntersectionPairs = -1
-	if result, err = UnionCheckedWithOptions(invalid, a); result != nil || err == nil {
+	if result, err = UnionWithOptions(invalid, a); result != nil || err == nil {
 		t.Fatalf("negative option returned result=%v err=%v", result, err)
 	}
 }
 
-func TestCheckedAPIRecoversTopology(t *testing.T) {
-	want := &TopologyError{Problem: "test topology", Count: 3}
-	var err error
-	func() {
-		defer recoverComplexity(&err)
-		panic(want)
-	}()
-	if err != want {
-		t.Fatalf("recovered error: got %#v want %#v", err, want)
+func TestTopologyFailureReturnsError(t *testing.T) {
+	mesh := model.NewMesh()
+	mesh.Add(&model.Segment{model.XY(0, 0), model.XY(1, 0)})
+	result, err := validateResultTopology(DefaultOptions(), mesh)
+	if result != nil {
+		t.Fatal("topology failure returned a mesh")
+	}
+	if _, ok := err.(*TopologyError); !ok {
+		t.Fatalf("topology failure returned %T, want *TopologyError", err)
 	}
 }
 
@@ -298,12 +328,12 @@ func TestNaryOperations(t *testing.T) {
 	a := model.NewMeshRect(model.XY(0, 0), model.XY(4, 4))
 	b := model.NewMeshRect(model.XY(1, 1), model.XY(2, 2))
 	c := model.NewMeshRect(model.XY(2.5, 2.5), model.XY(3.5, 3.5))
-	difference := Difference(a, b, c)
+	difference := mustDifference2D(t, a, b, c)
 	assertValidMesh(t, difference)
 	if area := difference.Area(); math.Abs(area-14) > 1e-8 {
 		t.Fatalf("n-ary difference area: got %g want 14", area)
 	}
-	intersection := Intersection(a,
+	intersection := mustIntersection2D(t, a,
 		model.NewMeshRect(model.XY(1, 1), model.XY(5, 5)),
 		model.NewMeshRect(model.XY(2, 2), model.XY(6, 6)))
 	assertValidMesh(t, intersection)

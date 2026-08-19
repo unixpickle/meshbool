@@ -12,7 +12,9 @@ func BenchmarkUnionRagged64(b *testing.B) {
 	c := benchmarkRaggedMesh(model.X(0.15), 64, 0.17)
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
-		Union(a, c)
+		if _, err := Union(a, c); err != nil {
+			b.Fatal(err)
+		}
 	}
 }
 

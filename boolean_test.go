@@ -13,6 +13,33 @@ import (
 	"github.com/unixpickle/model3d/model3d"
 )
 
+func mustUnion3D(t testing.TB, meshes ...*model3d.Mesh) *model3d.Mesh {
+	t.Helper()
+	result, err := Union(meshes...)
+	if err != nil {
+		t.Fatalf("Union failed: %v", err)
+	}
+	return result
+}
+
+func mustIntersection3D(t testing.TB, meshes ...*model3d.Mesh) *model3d.Mesh {
+	t.Helper()
+	result, err := Intersection(meshes...)
+	if err != nil {
+		t.Fatalf("Intersection failed: %v", err)
+	}
+	return result
+}
+
+func mustDifference3D(t testing.TB, first *model3d.Mesh, subtract ...*model3d.Mesh) *model3d.Mesh {
+	t.Helper()
+	result, err := Difference(first, subtract...)
+	if err != nil {
+		t.Fatalf("Difference failed: %v", err)
+	}
+	return result
+}
+
 func TestBoxBooleans(t *testing.T) {
 	a := model3d.NewMeshRect(model3d.XYZ(0, 0, 0), model3d.XYZ(2, 2, 2))
 	b := model3d.NewMeshRect(model3d.XYZ(1, 1, 1), model3d.XYZ(3, 3, 3))
@@ -21,9 +48,9 @@ func TestBoxBooleans(t *testing.T) {
 		mesh   *model3d.Mesh
 		volume float64
 	}{
-		{"union", Union(a, b), 15},
-		{"intersection", Intersection(a, b), 1},
-		{"difference", Difference(a, b), 7},
+		{"union", mustUnion3D(t, a, b), 15},
+		{"intersection", mustIntersection3D(t, a, b), 1},
+		{"difference", mustDifference3D(t, a, b), 7},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -39,7 +66,7 @@ func TestCoincidentBoxes(t *testing.T) {
 	a := model3d.NewMeshRect(model3d.XYZ(-1, -1, -1), model3d.XYZ(1, 1, 1))
 	b := a.DeepCopy()
 	for name, result := range map[string]*model3d.Mesh{
-		"union": Union(a, b), "intersection": Intersection(a, b),
+		"union": mustUnion3D(t, a, b), "intersection": mustIntersection3D(t, a, b),
 	} {
 		t.Run(name, func(t *testing.T) {
 			assertValidMesh3D(t, result)
@@ -48,7 +75,7 @@ func TestCoincidentBoxes(t *testing.T) {
 			}
 		})
 	}
-	if result := Difference(a, b); result.NumTriangles() != 0 {
+	if result := mustDifference3D(t, a, b); result.NumTriangles() != 0 {
 		t.Fatalf("coincident difference has %d triangles", result.NumTriangles())
 	}
 }
@@ -56,7 +83,7 @@ func TestCoincidentBoxes(t *testing.T) {
 func TestNestedBoxDifference(t *testing.T) {
 	outer := model3d.NewMeshRect(model3d.XYZ(-2, -2, -2), model3d.XYZ(2, 2, 2))
 	inner := model3d.NewMeshRect(model3d.XYZ(-1, -1, -1), model3d.XYZ(1, 1, 1))
-	result := Difference(outer, inner)
+	result := mustDifference3D(t, outer, inner)
 	assertValidMesh3D(t, result)
 	if math.Abs(result.Volume()-56) > 1e-7 {
 		t.Fatalf("volume: got %g want 56", result.Volume())
@@ -66,7 +93,7 @@ func TestNestedBoxDifference(t *testing.T) {
 func TestPointTangentCavity3D(t *testing.T) {
 	outer := model3d.NewMeshRect(model3d.Ones(-2), model3d.Ones(2))
 	inner := octahedronMesh(model3d.Coord3D{}, 2)
-	result := Difference(outer, inner)
+	result := mustDifference3D(t, outer, inner)
 	assertValidMesh3D(t, result)
 	want := 64 - 4*math.Pow(2, 3)/3
 	if got := result.Volume(); math.Abs(got-want) > 1e-6 {
@@ -77,12 +104,12 @@ func TestPointTangentCavity3D(t *testing.T) {
 func TestFaceTouchingBoxes(t *testing.T) {
 	a := model3d.NewMeshRect(model3d.XYZ(0, 0, 0), model3d.XYZ(1, 1, 1))
 	b := model3d.NewMeshRect(model3d.XYZ(1, 0, 0), model3d.XYZ(2, 1, 1))
-	result := Union(a, b)
+	result := mustUnion3D(t, a, b)
 	assertValidMesh3D(t, result)
 	if math.Abs(result.Volume()-2) > 1e-8 {
 		t.Fatalf("volume: got %g want 2", result.Volume())
 	}
-	if result := Intersection(a, b); result.NumTriangles() != 0 {
+	if result := mustIntersection3D(t, a, b); result.NumTriangles() != 0 {
 		t.Fatalf("zero-volume intersection has %d triangles", result.NumTriangles())
 	}
 }
@@ -94,7 +121,7 @@ func TestSingularTouchRegularization3D(t *testing.T) {
 		"point": model3d.NewMeshRect(model3d.XYZ(1, 1, 1), model3d.XYZ(2, 2, 2)),
 	} {
 		t.Run(name, func(t *testing.T) {
-			result := Union(a, other)
+			result := mustUnion3D(t, a, other)
 			assertValidMesh3D(t, result)
 			if math.Abs(result.Volume()-2) > 1e-8 {
 				t.Fatalf("volume: got %g want 2", result.Volume())
@@ -106,24 +133,24 @@ func TestSingularTouchRegularization3D(t *testing.T) {
 func TestConnectedPointSelfContact3D(t *testing.T) {
 	a := model3d.NewMeshRect(model3d.Coord3D{}, model3d.Ones(1))
 	b := model3d.NewMeshRect(model3d.Ones(1), model3d.Ones(2))
-	connector := Union(
+	connector := mustUnion3D(t,
 		model3d.NewMeshRect(model3d.XYZ(0.25, -1, 0.25), model3d.XYZ(0.75, 0.5, 0.75)),
 		model3d.NewMeshRect(model3d.XYZ(0.25, -1, 0.25), model3d.XYZ(1.75, -0.5, 0.75)),
 		model3d.NewMeshRect(model3d.XYZ(1.25, -1, 0.25), model3d.XYZ(1.75, 1.5, 1.5)),
 	)
-	result := Union(Union(a, connector), b)
+	result := mustUnion3D(t, mustUnion3D(t, a, connector), b)
 	assertValidMesh3D(t, result)
 }
 
 func TestConnectedEdgeSelfContact3D(t *testing.T) {
 	a := model3d.NewMeshRect(model3d.Coord3D{}, model3d.Ones(1))
 	b := model3d.NewMeshRect(model3d.XY(1, 1), model3d.XYZ(2, 2, 1))
-	connector := Union(
+	connector := mustUnion3D(t,
 		model3d.NewMeshRect(model3d.XYZ(0.25, -1, 0.25), model3d.XYZ(0.75, 0.5, 0.75)),
 		model3d.NewMeshRect(model3d.XYZ(0.25, -1, 0.25), model3d.XYZ(1.75, -0.5, 0.75)),
 		model3d.NewMeshRect(model3d.XYZ(1.25, -1, 0.25), model3d.XYZ(1.75, 1.5, 0.75)),
 	)
-	result := Union(Union(a, connector), b)
+	result := mustUnion3D(t, mustUnion3D(t, a, connector), b)
 	assertValidMesh3D(t, result)
 }
 
@@ -131,7 +158,7 @@ func TestLargeCoordinateOffset3D(t *testing.T) {
 	base := model3d.Ones(1e12)
 	a := model3d.NewMeshRect(base, base.Add(model3d.Ones(10)))
 	b := model3d.NewMeshRect(base.Add(model3d.Ones(5)), base.Add(model3d.Ones(15)))
-	result := Union(a, b)
+	result := mustUnion3D(t, a, b)
 	assertValidMesh3D(t, result)
 	volume := result.Translate(base.Scale(-1)).Volume()
 	if math.Abs(volume-1875) > 1e-5 {
@@ -143,7 +170,7 @@ func TestSmallCoordinateScale3D(t *testing.T) {
 	scale := 1e-6
 	a := model3d.NewMeshRect(model3d.Coord3D{}, model3d.Ones(2*scale))
 	b := model3d.NewMeshRect(model3d.Ones(scale), model3d.Ones(3*scale))
-	result := Union(a, b)
+	result := mustUnion3D(t, a, b)
 	assertValidMesh3D(t, result)
 	if volume := result.Volume(); math.Abs(volume-15*scale*scale*scale) > 1e-25 {
 		t.Fatalf("small-scale volume: got %g want %g", volume, 15*scale*scale*scale)
@@ -159,12 +186,12 @@ func TestThinOverlap3D(t *testing.T) {
 			if !a.Solid().Contains(probe) || !b.Solid().Contains(probe) {
 				t.Fatal("model3d collider cannot classify the center of the thin overlap")
 			}
-			intersection := Intersection(a, b)
+			intersection := mustIntersection3D(t, a, b)
 			assertValidMesh3D(t, intersection)
 			if volume := intersection.Volume(); math.Abs(volume-thickness) > thickness*1e-4 {
 				t.Fatalf("thin intersection volume: got %g want %g", volume, thickness)
 			}
-			difference := Difference(a, b)
+			difference := mustDifference3D(t, a, b)
 			assertValidMesh3D(t, difference)
 			if volume := difference.Volume(); math.Abs(volume-(1-thickness)) > 1e-11 {
 				t.Fatalf("thin difference volume: got %g want %g", volume, 1-thickness)
@@ -188,7 +215,7 @@ func TestBooleanIdentitiesIcospheres(t *testing.T) {
 		b := randomRaggedIcosphere(rng, model3d.X(0.25))
 		assertValidMesh3D(t, a)
 		assertValidMesh3D(t, b)
-		u, i, d := Union(a, b), Intersection(a, b), Difference(a, b)
+		u, i, d := mustUnion3D(t, a, b), mustIntersection3D(t, a, b), mustDifference3D(t, a, b)
 		for name, result := range map[string]*model3d.Mesh{"union": u, "intersection": i, "difference": d} {
 			t.Run(name, func(t *testing.T) { assertValidMesh3D(t, result) })
 		}
@@ -248,9 +275,9 @@ func TestRandomBoxBooleans(t *testing.T) {
 			mesh *model3d.Mesh
 			want float64
 		}{
-			{"union", Union(a, b), sizeA.X*sizeA.Y*sizeA.Z + sizeB.X*sizeB.Y*sizeB.Z - intersectionVolume},
-			{"intersection", Intersection(a, b), intersectionVolume},
-			{"difference", Difference(a, b), sizeA.X*sizeA.Y*sizeA.Z - intersectionVolume},
+			{"union", mustUnion3D(t, a, b), sizeA.X*sizeA.Y*sizeA.Z + sizeB.X*sizeB.Y*sizeB.Z - intersectionVolume},
+			{"intersection", mustIntersection3D(t, a, b), intersectionVolume},
+			{"difference", mustDifference3D(t, a, b), sizeA.X*sizeA.Y*sizeA.Z - intersectionVolume},
 		}
 		for _, test := range tests {
 			assertValidMesh3D(t, test.mesh)
@@ -270,12 +297,12 @@ func TestNaryOperations3D(t *testing.T) {
 	a := model3d.NewMeshRect(model3d.XYZ(0, 0, 0), model3d.XYZ(4, 4, 4))
 	b := model3d.NewMeshRect(model3d.XYZ(1, 1, 1), model3d.XYZ(2, 2, 2))
 	c := model3d.NewMeshRect(model3d.XYZ(2.5, 2.5, 2.5), model3d.XYZ(3.5, 3.5, 3.5))
-	difference := Difference(a, b, c)
+	difference := mustDifference3D(t, a, b, c)
 	assertValidMesh3D(t, difference)
 	if volume := difference.Volume(); math.Abs(volume-62) > 1e-8 {
 		t.Fatalf("n-ary difference volume: got %g want 62", volume)
 	}
-	intersection := Intersection(a, model3d.NewMeshRect(model3d.Ones(1), model3d.Ones(5)),
+	intersection := mustIntersection3D(t, a, model3d.NewMeshRect(model3d.Ones(1), model3d.Ones(5)),
 		model3d.NewMeshRect(model3d.Ones(2), model3d.Ones(6)))
 	assertValidMesh3D(t, intersection)
 	if volume := intersection.Volume(); math.Abs(volume-8) > 1e-8 {
@@ -285,23 +312,24 @@ func TestNaryOperations3D(t *testing.T) {
 
 func TestEmptyInputs3D(t *testing.T) {
 	a := model3d.NewMeshRect(model3d.Coord3D{}, model3d.Ones(1))
-	if Union().NumTriangles() != 0 || Intersection().NumTriangles() != 0 || Difference(nil, a).NumTriangles() != 0 {
+	if mustUnion3D(t).NumTriangles() != 0 || mustIntersection3D(t).NumTriangles() != 0 ||
+		mustDifference3D(t, nil, a).NumTriangles() != 0 {
 		t.Fatal("zero-input operation was not empty")
 	}
-	result := Difference(a)
+	result := mustDifference3D(t, a)
 	assertValidMesh3D(t, result)
 	if math.Abs(result.Volume()-1) > 1e-8 {
 		t.Fatalf("identity difference volume: %g", result.Volume())
 	}
 }
 
-func TestCheckedAPIs3D(t *testing.T) {
+func TestErrorReturningAPIs3D(t *testing.T) {
 	a := model3d.NewMeshRect(model3d.Coord3D{}, model3d.Ones(1))
 	b := model3d.NewMeshRect(model3d.Ones(0.5), model3d.Ones(1.5))
 	for name, operation := range map[string]func() (*model3d.Mesh, error){
-		"union":        func() (*model3d.Mesh, error) { return UnionChecked(a, b) },
-		"intersection": func() (*model3d.Mesh, error) { return IntersectionChecked(a, b) },
-		"difference":   func() (*model3d.Mesh, error) { return DifferenceChecked(a, b) },
+		"union":        func() (*model3d.Mesh, error) { return Union(a, b) },
+		"intersection": func() (*model3d.Mesh, error) { return Intersection(a, b) },
+		"difference":   func() (*model3d.Mesh, error) { return Difference(a, b) },
 	} {
 		t.Run(name, func(t *testing.T) {
 			result, err := operation()
@@ -321,7 +349,7 @@ func TestOptions3D(t *testing.T) {
 	}
 	a := model3d.NewMeshRect(model3d.Coord3D{}, model3d.Ones(1))
 	b := model3d.NewMeshRect(model3d.Ones(0.5), model3d.Ones(1.5))
-	result, err := UnionCheckedWithOptions(Options{}, a, b)
+	result, err := UnionWithOptions(Options{}, a, b)
 	if err != nil {
 		t.Fatalf("zero options did not use defaults: %v", err)
 	}
@@ -329,7 +357,7 @@ func TestOptions3D(t *testing.T) {
 
 	limited := DefaultOptions()
 	limited.MaxInputTriangles = a.NumTriangles() - 1
-	result, err = UnionCheckedWithOptions(limited, a)
+	result, err = UnionWithOptions(limited, a)
 	if result != nil {
 		t.Fatal("limited operation returned a mesh")
 	}
@@ -340,25 +368,21 @@ func TestOptions3D(t *testing.T) {
 
 	invalid := DefaultOptions()
 	invalid.MaxOutputTriangles = -1
-	if result, err = UnionCheckedWithOptions(invalid, a); result != nil || err == nil {
+	if result, err = UnionWithOptions(invalid, a); result != nil || err == nil {
 		t.Fatalf("negative option returned result=%v err=%v", result, err)
 	}
 
 	planarLimited := DefaultOptions()
 	planarLimited.PlanarOptions.MaxInputSegments = 1
-	result, err = UnionCheckedWithOptions(planarLimited, a, b)
+	result, err = UnionWithOptions(planarLimited, a, b)
 	complexity, ok = err.(*ComplexityError)
 	if result != nil || !ok || complexity.Stage != "planar input segments" {
 		t.Fatalf("planar limit was not propagated: result=%v err=%#v", result, err)
 	}
 }
 
-func TestCheckedAPIRecoversPlanarComplexity(t *testing.T) {
-	var err error
-	func() {
-		defer recoverComplexity(&err)
-		panic(&bool2d.ComplexityError{Stage: "test arrangement", Limit: 123})
-	}()
+func TestConvertPlanarComplexity(t *testing.T) {
+	err := convertPlanarError(&bool2d.ComplexityError{Stage: "test arrangement", Limit: 123})
 	complexity, ok := err.(*ComplexityError)
 	if !ok {
 		t.Fatalf("error type: got %T want *ComplexityError", err)
@@ -368,12 +392,8 @@ func TestCheckedAPIRecoversPlanarComplexity(t *testing.T) {
 	}
 }
 
-func TestCheckedAPIRecoversPlanarTopology(t *testing.T) {
-	var err error
-	func() {
-		defer recoverComplexity(&err)
-		panic(&bool2d.TopologyError{Problem: "test topology", Count: 7})
-	}()
+func TestConvertPlanarTopology(t *testing.T) {
+	err := convertPlanarError(&bool2d.TopologyError{Problem: "test topology", Count: 7})
 	topology, ok := err.(*TopologyError)
 	if !ok {
 		t.Fatalf("error type: got %T want *TopologyError", err)

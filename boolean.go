@@ -110,184 +110,131 @@ func (t *TopologyError) Error() string {
 
 // Union computes the closed-set union of zero or more triangle meshes.
 // Input meshes are not modified.
-func Union(meshes ...*model3d.Mesh) *model3d.Mesh {
+func Union(meshes ...*model3d.Mesh) (*model3d.Mesh, error) {
 	return UnionWithOptions(DefaultOptions(), meshes...)
 }
 
-// UnionWithOptions computes a union with configurable safety limits. It
-// panics on complexity or topology failure.
-func UnionWithOptions(options Options, meshes ...*model3d.Mesh) *model3d.Mesh {
-	result, err := UnionCheckedWithOptions(options, meshes...)
-	if err != nil {
-		panic(err)
-	}
-	return result
-}
-
-// UnionChecked is like Union, but reports complexity and output-topology
-// failures as errors instead of panicking.
-func UnionChecked(meshes ...*model3d.Mesh) (result *model3d.Mesh, err error) {
-	return UnionCheckedWithOptions(DefaultOptions(), meshes...)
-}
-
-// UnionCheckedWithOptions is like UnionWithOptions, but returns complexity,
-// topology, and invalid-option failures as errors.
-func UnionCheckedWithOptions(options Options, meshes ...*model3d.Mesh) (result *model3d.Mesh, err error) {
-	options, err = normalizeOptions(options)
+// UnionWithOptions computes a union with configurable safety limits.
+func UnionWithOptions(options Options, meshes ...*model3d.Mesh) (*model3d.Mesh, error) {
+	options, err := normalizeOptions(options)
 	if err != nil {
 		return nil, err
 	}
-	defer recoverComplexity(&err)
-	return unionUnchecked(options, meshes...), nil
+	return union(options, meshes...)
 }
 
-func unionUnchecked(options Options, meshes ...*model3d.Mesh) *model3d.Mesh {
+func union(options Options, meshes ...*model3d.Mesh) (*model3d.Mesh, error) {
 	meshes = nonNilMeshes(meshes)
 	if len(meshes) == 0 {
-		return model3d.NewMesh()
+		return model3d.NewMesh(), nil
 	}
-	checkInputMeshes(options, meshes)
+	if err := checkInputMeshes(options, meshes); err != nil {
+		return nil, err
+	}
 	result := meshes[0].DeepCopy()
 	for _, mesh := range meshes[1:] {
-		result = booleanMeshPair(options, result, mesh, meshUnion)
+		var err error
+		result, err = booleanMeshPair(options, result, mesh, meshUnion)
+		if err != nil {
+			return nil, err
+		}
 	}
-	return result
+	return result, nil
 }
 
 // Intersection computes the intersection of zero or more triangle meshes.
 // With no arguments, it returns an empty mesh. Input meshes are not modified.
-func Intersection(meshes ...*model3d.Mesh) *model3d.Mesh {
+func Intersection(meshes ...*model3d.Mesh) (*model3d.Mesh, error) {
 	return IntersectionWithOptions(DefaultOptions(), meshes...)
 }
 
 // IntersectionWithOptions computes an intersection with configurable safety
-// limits. It panics on complexity or topology failure.
-func IntersectionWithOptions(options Options, meshes ...*model3d.Mesh) *model3d.Mesh {
-	result, err := IntersectionCheckedWithOptions(options, meshes...)
-	if err != nil {
-		panic(err)
-	}
-	return result
-}
-
-// IntersectionChecked is like Intersection, but reports complexity and
-// output-topology failures as errors instead of panicking.
-func IntersectionChecked(meshes ...*model3d.Mesh) (result *model3d.Mesh, err error) {
-	return IntersectionCheckedWithOptions(DefaultOptions(), meshes...)
-}
-
-// IntersectionCheckedWithOptions is like IntersectionWithOptions, but returns
-// complexity, topology, and invalid-option failures as errors.
-func IntersectionCheckedWithOptions(options Options, meshes ...*model3d.Mesh) (result *model3d.Mesh, err error) {
-	options, err = normalizeOptions(options)
+// limits.
+func IntersectionWithOptions(options Options, meshes ...*model3d.Mesh) (*model3d.Mesh, error) {
+	options, err := normalizeOptions(options)
 	if err != nil {
 		return nil, err
 	}
-	defer recoverComplexity(&err)
-	return intersectionUnchecked(options, meshes...), nil
+	return intersection(options, meshes...)
 }
 
-func intersectionUnchecked(options Options, meshes ...*model3d.Mesh) *model3d.Mesh {
+func intersection(options Options, meshes ...*model3d.Mesh) (*model3d.Mesh, error) {
 	meshes = nonNilMeshes(meshes)
 	if len(meshes) == 0 {
-		return model3d.NewMesh()
+		return model3d.NewMesh(), nil
 	}
-	checkInputMeshes(options, meshes)
+	if err := checkInputMeshes(options, meshes); err != nil {
+		return nil, err
+	}
 	result := meshes[0].DeepCopy()
 	for _, mesh := range meshes[1:] {
-		result = booleanMeshPair(options, result, mesh, meshIntersection)
+		var err error
+		result, err = booleanMeshPair(options, result, mesh, meshIntersection)
+		if err != nil {
+			return nil, err
+		}
 		if result.NumTriangles() == 0 {
 			break
 		}
 	}
-	return result
+	return result, nil
 }
 
 // Difference subtracts every mesh in subtract from first. Input meshes are not
 // modified.
-func Difference(first *model3d.Mesh, subtract ...*model3d.Mesh) *model3d.Mesh {
+func Difference(first *model3d.Mesh, subtract ...*model3d.Mesh) (*model3d.Mesh, error) {
 	return DifferenceWithOptions(DefaultOptions(), first, subtract...)
 }
 
 // DifferenceWithOptions computes a difference with configurable safety
-// limits. It panics on complexity or topology failure.
-func DifferenceWithOptions(options Options, first *model3d.Mesh, subtract ...*model3d.Mesh) *model3d.Mesh {
-	result, err := DifferenceCheckedWithOptions(options, first, subtract...)
-	if err != nil {
-		panic(err)
-	}
-	return result
-}
-
-// DifferenceChecked is like Difference, but reports complexity and
-// output-topology failures as errors instead of panicking.
-func DifferenceChecked(first *model3d.Mesh, subtract ...*model3d.Mesh) (result *model3d.Mesh, err error) {
-	return DifferenceCheckedWithOptions(DefaultOptions(), first, subtract...)
-}
-
-// DifferenceCheckedWithOptions is like DifferenceWithOptions, but returns
-// complexity, topology, and invalid-option failures as errors.
-func DifferenceCheckedWithOptions(options Options, first *model3d.Mesh,
-	subtract ...*model3d.Mesh) (result *model3d.Mesh, err error) {
-	options, err = normalizeOptions(options)
+// limits.
+func DifferenceWithOptions(options Options, first *model3d.Mesh,
+	subtract ...*model3d.Mesh) (*model3d.Mesh, error) {
+	options, err := normalizeOptions(options)
 	if err != nil {
 		return nil, err
 	}
-	defer recoverComplexity(&err)
-	return differenceUnchecked(options, first, subtract...), nil
+	return difference(options, first, subtract...)
 }
 
-func differenceUnchecked(options Options, first *model3d.Mesh, subtract ...*model3d.Mesh) *model3d.Mesh {
+func difference(options Options, first *model3d.Mesh, subtract ...*model3d.Mesh) (*model3d.Mesh, error) {
 	if first == nil {
-		return model3d.NewMesh()
+		return model3d.NewMesh(), nil
 	}
 	meshes := make([]*model3d.Mesh, 1, 1+len(subtract))
 	meshes[0] = first
 	meshes = append(meshes, nonNilMeshes(subtract)...)
-	checkInputMeshes(options, meshes)
+	if err := checkInputMeshes(options, meshes); err != nil {
+		return nil, err
+	}
 	result := first.DeepCopy()
 	for _, mesh := range meshes[1:] {
-		result = booleanMeshPair(options, result, mesh, meshDifference)
+		var err error
+		result, err = booleanMeshPair(options, result, mesh, meshDifference)
+		if err != nil {
+			return nil, err
+		}
 		if result.NumTriangles() == 0 {
 			break
 		}
 	}
-	return result
+	return result, nil
 }
 
-func recoverComplexity(err *error) {
-	if value := recover(); value != nil {
-		switch complexity := value.(type) {
-		case *ComplexityError:
-			*err = complexity
-			return
-		case *bool2d.ComplexityError:
-			*err = &ComplexityError{
-				Stage: "planar " + complexity.Stage,
-				Limit: complexity.Limit,
-			}
-			return
-		case *TopologyError:
-			*err = complexity
-			return
-		case *bool2d.TopologyError:
-			*err = &TopologyError{Problem: "planar " + complexity.Problem, Count: complexity.Count}
-			return
-		}
-		panic(value)
-	}
-}
-
-func checkComplexity(stage string, count, limit int) {
+func checkComplexity(stage string, count, limit int) error {
 	if count > limit {
-		panic(&ComplexityError{Stage: stage, Limit: limit})
+		return &ComplexityError{Stage: stage, Limit: limit}
 	}
+	return nil
 }
 
-func checkInputMeshes(options Options, meshes []*model3d.Mesh) {
+func checkInputMeshes(options Options, meshes []*model3d.Mesh) error {
 	for _, mesh := range meshes {
-		checkComplexity("triangles in one input mesh", mesh.NumTriangles(), options.MaxInputTriangles)
+		if err := checkComplexity("triangles in one input mesh", mesh.NumTriangles(), options.MaxInputTriangles); err != nil {
+			return err
+		}
 	}
+	return nil
 }
 
 type meshBooleanKind int
@@ -298,19 +245,23 @@ const (
 	meshDifference
 )
 
-func booleanMeshPair(options Options, a, b *model3d.Mesh, kind meshBooleanKind) *model3d.Mesh {
-	checkInputMeshes(options, []*model3d.Mesh{a, b})
+func booleanMeshPair(options Options, a, b *model3d.Mesh, kind meshBooleanKind) (*model3d.Mesh, error) {
+	if err := checkInputMeshes(options, []*model3d.Mesh{a, b}); err != nil {
+		return nil, err
+	}
 	if a.NumTriangles() == 0 || b.NumTriangles() == 0 {
 		switch kind {
 		case meshUnion:
 			if a.NumTriangles() == 0 {
-				return b.DeepCopy()
+				return b.DeepCopy(), nil
 			}
-			return a.DeepCopy()
+			return a.DeepCopy(), nil
 		case meshIntersection:
-			return model3d.NewMesh()
+			return model3d.NewMesh(), nil
 		case meshDifference:
-			return a.DeepCopy()
+			return a.DeepCopy(), nil
+		default:
+			return nil, fmt.Errorf("meshbool: unknown boolean operation %d", kind)
 		}
 	}
 	min := a.Min().Min(b.Min())
@@ -320,14 +271,22 @@ func booleanMeshPair(options Options, a, b *model3d.Mesh, kind meshBooleanKind) 
 	if center.Abs().MaxCoord() > math.Max(span, 1)*1024 {
 		localA := a.Translate(center.Scale(-1))
 		localB := b.Translate(center.Scale(-1))
-		return booleanMeshPairLocal(options, localA, localB, kind).Translate(center)
+		result, err := booleanMeshPairLocal(options, localA, localB, kind)
+		if err != nil {
+			return nil, err
+		}
+		return result.Translate(center), nil
 	}
 	return booleanMeshPairLocal(options, a, b, kind)
 }
 
-func booleanMeshPairLocal(options Options, a, b *model3d.Mesh, kind meshBooleanKind) *model3d.Mesh {
-	checkComplexity("triangles in one input mesh", a.NumTriangles(), options.MaxInputTriangles)
-	checkComplexity("triangles in one input mesh", b.NumTriangles(), options.MaxInputTriangles)
+func booleanMeshPairLocal(options Options, a, b *model3d.Mesh, kind meshBooleanKind) (*model3d.Mesh, error) {
+	if err := checkComplexity("triangles in one input mesh", a.NumTriangles(), options.MaxInputTriangles); err != nil {
+		return nil, err
+	}
+	if err := checkComplexity("triangles in one input mesh", b.NumTriangles(), options.MaxInputTriangles); err != nil {
+		return nil, err
+	}
 	trianglesA, trianglesB := sortedTriangles(a), sortedTriangles(b)
 	indexA, indexB := newTriangleIndex(trianglesA), newTriangleIndex(trianglesB)
 	colliderA := model3d.GroupedTrianglesToCollider(trianglesA)
@@ -338,18 +297,30 @@ func booleanMeshPairLocal(options Options, a, b *model3d.Mesh, kind meshBooleanK
 	tol := math.Max(scale*1e-9, math.SmallestNonzeroFloat64*1024)
 	candidatePairs := 0
 	var fragments []*polygon
-	fragments = append(fragments, splitAndClassifyMesh(
-		options, trianglesA, colliderB, indexB, solidA, solidB, kind, tol, true, &candidatePairs)...)
-	checkComplexity("surface fragments", len(fragments), options.MaxTotalFragments)
-	fragments = append(fragments, splitAndClassifyMesh(
-		options, trianglesB, colliderA, indexA, solidA, solidB, kind, tol, false, &candidatePairs)...)
-	checkComplexity("surface fragments", len(fragments), options.MaxTotalFragments)
+	newFragments, err := splitAndClassifyMesh(
+		options, trianglesA, colliderB, indexB, solidA, solidB, kind, tol, true, &candidatePairs)
+	if err != nil {
+		return nil, err
+	}
+	fragments = append(fragments, newFragments...)
+	if err := checkComplexity("surface fragments", len(fragments), options.MaxTotalFragments); err != nil {
+		return nil, err
+	}
+	newFragments, err = splitAndClassifyMesh(
+		options, trianglesB, colliderA, indexA, solidA, solidB, kind, tol, false, &candidatePairs)
+	if err != nil {
+		return nil, err
+	}
+	fragments = append(fragments, newFragments...)
+	if err := checkComplexity("surface fragments", len(fragments), options.MaxTotalFragments); err != nil {
+		return nil, err
+	}
 	return polygonsMesh(options, fragments, scale)
 }
 
 func splitAndClassifyMesh(options Options, triangles []*model3d.Triangle, other model3d.TriangleCollider, otherIndex *triangleIndex,
 	solidA, solidB model3d.Solid, kind meshBooleanKind, tol float64, sourceA bool,
-	candidatePairs *int) []*polygon {
+	candidatePairs *int) ([]*polygon, error) {
 	var result []*polygon
 	for _, tri := range triangles {
 		if tri.Area() <= tol*tol {
@@ -373,7 +344,9 @@ func splitAndClassifyMesh(options Options, triangles []*model3d.Triangle, other 
 		var nearby []*model3d.Triangle
 		otherIndex.query(tri.Min().AddScalar(-tol), tri.Max().AddScalar(tol), &nearby)
 		*candidatePairs += len(nearby)
-		checkComplexity("triangle candidate pairs", *candidatePairs, options.MaxTriangleCandidatePairs)
+		if err := checkComplexity("triangle candidate pairs", *candidatePairs, options.MaxTriangleCandidatePairs); err != nil {
+			return nil, err
+		}
 		projectedTri := []model2d.Coord{project(tri[0]), project(tri[1]), project(tri[2])}
 		for _, candidate := range nearby {
 			candidateNormal := candidate.Normal()
@@ -401,11 +374,15 @@ func splitAndClassifyMesh(options Options, triangles []*model3d.Triangle, other 
 				frontPiece, backPiece := splitPolygon2D(piece, p1, p2, tol)
 				if len(frontPiece) >= 3 {
 					next = append(next, frontPiece)
-					checkComplexity("fragments for one triangle", len(next), options.MaxFragmentsPerTriangle)
+					if err := checkComplexity("fragments for one triangle", len(next), options.MaxFragmentsPerTriangle); err != nil {
+						return nil, err
+					}
 				}
 				if len(backPiece) >= 3 {
 					next = append(next, backPiece)
-					checkComplexity("fragments for one triangle", len(next), options.MaxFragmentsPerTriangle)
+					if err := checkComplexity("fragments for one triangle", len(next), options.MaxFragmentsPerTriangle); err != nil {
+						return nil, err
+					}
 				}
 			}
 			pieces = next
@@ -426,11 +403,25 @@ func splitAndClassifyMesh(options Options, triangles []*model3d.Triangle, other 
 				// The source triangle itself defines A exactly on either side;
 				// asking a ray collider to rediscover this near a coplanar seam is
 				// less reliable, especially for very thin results.
-				plus = evalMeshBoolean(kind, false, solidB.Contains(plusPoint))
-				minus = evalMeshBoolean(kind, true, solidB.Contains(minusPoint))
+				var err error
+				plus, err = evalMeshBoolean(kind, false, solidB.Contains(plusPoint))
+				if err != nil {
+					return nil, err
+				}
+				minus, err = evalMeshBoolean(kind, true, solidB.Contains(minusPoint))
+				if err != nil {
+					return nil, err
+				}
 			} else {
-				plus = evalMeshBoolean(kind, solidA.Contains(plusPoint), false)
-				minus = evalMeshBoolean(kind, solidA.Contains(minusPoint), true)
+				var err error
+				plus, err = evalMeshBoolean(kind, solidA.Contains(plusPoint), false)
+				if err != nil {
+					return nil, err
+				}
+				minus, err = evalMeshBoolean(kind, solidA.Contains(minusPoint), true)
+				if err != nil {
+					return nil, err
+				}
 			}
 			if plus == minus {
 				continue
@@ -444,10 +435,12 @@ func splitAndClassifyMesh(options Options, triangles []*model3d.Triangle, other 
 				poly.flip()
 			}
 			result = append(result, poly)
-			checkComplexity("surface fragments", len(result), options.MaxTotalFragments)
+			if err := checkComplexity("surface fragments", len(result), options.MaxTotalFragments); err != nil {
+				return nil, err
+			}
 		}
 	}
-	return result
+	return result, nil
 }
 
 func sortedTriangles(mesh *model3d.Mesh) []*model3d.Triangle {
@@ -542,16 +535,16 @@ func projectionRange2D(points []model2d.Coord, axis model2d.Coord) (float64, flo
 	return min, max
 }
 
-func evalMeshBoolean(kind meshBooleanKind, inA, inB bool) bool {
+func evalMeshBoolean(kind meshBooleanKind, inA, inB bool) (bool, error) {
 	switch kind {
 	case meshUnion:
-		return inA || inB
+		return inA || inB, nil
 	case meshIntersection:
-		return inA && inB
+		return inA && inB, nil
 	case meshDifference:
-		return inA && !inB
+		return inA && !inB, nil
 	default:
-		panic("invalid mesh boolean kind")
+		return false, fmt.Errorf("meshbool: unknown boolean operation %d", kind)
 	}
 }
 
@@ -623,7 +616,7 @@ type coplanarGroup struct {
 
 type planeGroupKey [4]int64
 
-func polygonsMesh(options Options, polygons []*polygon, scale float64) *model3d.Mesh {
+func polygonsMesh(options Options, polygons []*polygon, scale float64) (*model3d.Mesh, error) {
 	tol := math.Max(scale*1e-9, math.SmallestNonzeroFloat64*1024)
 	var groups []*coplanarGroup
 	normalStep := 1e-10
@@ -680,18 +673,47 @@ func polygonsMesh(options Options, polygons []*polygon, scale float64) *model3d.
 
 	var raw []model3d.Triangle
 	for _, group := range groups {
-		positive := bool2d.UnionWithOptions(options.PlanarOptions, group.positive...)
-		negative := bool2d.UnionWithOptions(options.PlanarOptions, group.negative...)
+		positive, err := bool2d.UnionWithOptions(options.PlanarOptions, group.positive...)
+		if err != nil {
+			return nil, convertPlanarError(err)
+		}
+		negative, err := bool2d.UnionWithOptions(options.PlanarOptions, group.negative...)
+		if err != nil {
+			return nil, convertPlanarError(err)
+		}
 		if positive.NumSegments() != 0 {
-			raw = append(raw, liftPlanarMesh(positive, group, true)...)
-			checkComplexity("triangulated coplanar surfaces", len(raw), options.MaxOutputTriangles)
+			triangles, err := liftPlanarMesh(positive, group, true)
+			if err != nil {
+				return nil, err
+			}
+			raw = append(raw, triangles...)
+			if err := checkComplexity("triangulated coplanar surfaces", len(raw), options.MaxOutputTriangles); err != nil {
+				return nil, err
+			}
 		}
 		if negative.NumSegments() != 0 {
-			raw = append(raw, liftPlanarMesh(negative, group, false)...)
-			checkComplexity("triangulated coplanar surfaces", len(raw), options.MaxOutputTriangles)
+			triangles, err := liftPlanarMesh(negative, group, false)
+			if err != nil {
+				return nil, err
+			}
+			raw = append(raw, triangles...)
+			if err := checkComplexity("triangulated coplanar surfaces", len(raw), options.MaxOutputTriangles); err != nil {
+				return nil, err
+			}
 		}
 	}
 	return finalizeTriangles(options, raw, tol)
+}
+
+func convertPlanarError(err error) error {
+	switch failure := err.(type) {
+	case *bool2d.ComplexityError:
+		return &ComplexityError{Stage: "planar " + failure.Stage, Limit: failure.Limit}
+	case *bool2d.TopologyError:
+		return &TopologyError{Problem: "planar " + failure.Problem, Count: failure.Count}
+	default:
+		return fmt.Errorf("meshbool: planar operation: %w", err)
+	}
 }
 
 func canonicalPlane(normal model3d.Coord3D, w float64) (model3d.Coord3D, float64, bool) {
@@ -710,12 +732,15 @@ func planeBasis(normal model3d.Coord3D) (model3d.Coord3D, model3d.Coord3D) {
 	return u, v
 }
 
-func liftPlanarMesh(mesh *model2d.Mesh, group *coplanarGroup, positive bool) []model3d.Triangle {
+func liftPlanarMesh(mesh *model2d.Mesh, group *coplanarGroup, positive bool) ([]model3d.Triangle, error) {
 	u, v := planeBasis(group.normal)
 	lift := func(c model2d.Coord) model3d.Coord3D {
 		return u.Scale(c.X).Add(v.Scale(c.Y)).Add(group.normal.Scale(group.w))
 	}
-	triangles2d := triangulatePlanarMesh(mesh)
+	triangles2d, err := triangulatePlanarMesh(mesh)
+	if err != nil {
+		return nil, err
+	}
 	result := make([]model3d.Triangle, 0, len(triangles2d))
 	desired := group.normal
 	if !positive {
@@ -728,18 +753,20 @@ func liftPlanarMesh(mesh *model2d.Mesh, group *coplanarGroup, positive bool) []m
 		}
 		result = append(result, tri)
 	}
-	return result
+	return result, nil
 }
 
-func triangulatePlanarMesh(mesh *model2d.Mesh) [][3]model2d.Coord {
+func triangulatePlanarMesh(mesh *model2d.Mesh) ([][3]model2d.Coord, error) {
 	if !mesh.Manifold() {
-		panic(&TopologyError{Problem: "non-manifold planar triangulation boundary"})
+		return nil, &TopologyError{Problem: "non-manifold planar triangulation boundary"}
 	}
-	return model2d.TriangulateMesh(mesh)
+	return model2d.TriangulateMesh(mesh), nil
 }
 
-func finalizeTriangles(options Options, raw []model3d.Triangle, tol float64) *model3d.Mesh {
-	checkComplexity("output triangles", len(raw), options.MaxOutputTriangles)
+func finalizeTriangles(options Options, raw []model3d.Triangle, tol float64) (*model3d.Mesh, error) {
+	if err := checkComplexity("output triangles", len(raw), options.MaxOutputTriangles); err != nil {
+		return nil, err
+	}
 	canon := newCoordCanonicalizer(tol)
 	for i := range raw {
 		for j := range raw[i] {
@@ -750,7 +777,9 @@ func finalizeTriangles(options Options, raw []model3d.Triangle, tol float64) *mo
 	conformed := make([]model3d.Triangle, 0, len(raw))
 	for _, tri := range raw {
 		conformed = append(conformed, conformTriangle(tri, index, tol)...)
-		checkComplexity("conforming output triangles", len(conformed), options.MaxOutputTriangles)
+		if err := checkComplexity("conforming output triangles", len(conformed), options.MaxOutputTriangles); err != nil {
+			return nil, err
+		}
 	}
 	raw = conformed
 	balances := map[triangleKey]triangleBalance{}
@@ -813,29 +842,32 @@ func finalizeTriangles(options Options, raw []model3d.Triangle, tol float64) *mo
 		triCopy := tri
 		result.Add(&triCopy)
 	}
-	result = separateContactEdges(options, result, tol)
+	result, err := separateContactEdges(options, result, tol)
+	if err != nil {
+		return nil, err
+	}
 	result = separateContactComponents(result, tol)
 	result = separateSingularVertexFans(result, tol)
 	return validateResultTopology(result)
 }
 
-func validateResultTopology(mesh *model3d.Mesh) *model3d.Mesh {
+func validateResultTopology(mesh *model3d.Mesh) (*model3d.Mesh, error) {
 	if mesh.NumTriangles() == 0 {
-		return mesh
+		return mesh, nil
 	}
 	if mesh.NeedsRepair() {
-		panic(&TopologyError{Problem: "edges do not each have two incident triangles"})
+		return nil, &TopologyError{Problem: "edges do not each have two incident triangles"}
 	}
 	if singular := mesh.SingularVertices(); len(singular) != 0 {
-		panic(&TopologyError{Problem: "singular vertices", Count: len(singular)})
+		return nil, &TopologyError{Problem: "singular vertices", Count: len(singular)}
 	}
 	if !mesh.Orientable() {
-		panic(&TopologyError{Problem: "non-orientable surface"})
+		return nil, &TopologyError{Problem: "non-orientable surface"}
 	}
 	if intersections := mesh.SelfIntersections(); intersections != 0 {
-		panic(&TopologyError{Problem: "self-intersections", Count: intersections})
+		return nil, &TopologyError{Problem: "self-intersections", Count: intersections}
 	}
-	return mesh
+	return mesh, nil
 }
 
 type contactEdgeTriangle struct {
@@ -848,7 +880,7 @@ type contactEdgeTriangle struct {
 // one slightly displaced V-shaped edge per oriented surface pair. This turns
 // an exact edge contact into point contacts at its endpoints, which the later
 // vertex cleanup can resolve without opening either surface.
-func separateContactEdges(options Options, mesh *model3d.Mesh, tol float64) *model3d.Mesh {
+func separateContactEdges(options Options, mesh *model3d.Mesh, tol float64) (*model3d.Mesh, error) {
 	edgeCounts := map[model3d.Segment]int{}
 	mesh.Iterate(func(triangle *model3d.Triangle) {
 		for i := range triangle {
@@ -862,7 +894,7 @@ func separateContactEdges(options Options, mesh *model3d.Mesh, tol float64) *mod
 		}
 	}
 	if len(contacts) == 0 {
-		return mesh
+		return mesh, nil
 	}
 	sort.Slice(contacts, func(i, j int) bool {
 		if contacts[i][0] != contacts[j][0] {
@@ -876,21 +908,41 @@ func separateContactEdges(options Options, mesh *model3d.Mesh, tol float64) *mod
 		if len(incident) <= 2 || len(incident)%2 != 0 {
 			continue
 		}
-		checkComplexity("triangles at one contact edge", len(incident), options.MaxContactEdgeTriangles)
-		groups, directions := pairContactEdgeTriangles(edge, incident)
+		if err := checkComplexity("triangles at one contact edge", len(incident), options.MaxContactEdgeTriangles); err != nil {
+			return nil, err
+		}
+		groups, directions, err := pairContactEdgeTriangles(edge, incident)
+		if err != nil {
+			return nil, err
+		}
 		midpoint := edge.Mid()
 		for groupIndex, group := range groups {
 			shift := math.Min(tol*4, edge.Length()*0.25)
 			for _, triangle := range group {
-				shift = math.Min(shift, midpoint.Dist(contactEdgeOtherVertex(edge, triangle))*0.25)
+				other, err := contactEdgeOtherVertex(edge, triangle)
+				if err != nil {
+					return nil, err
+				}
+				shift = math.Min(shift, midpoint.Dist(other)*0.25)
 			}
 			newMidpoint := midpoint.Add(directions[groupIndex].Scale(shift))
 			for _, triangle := range group {
-				other := contactEdgeOtherVertex(edge, triangle)
+				other, err := contactEdgeOtherVertex(edge, triangle)
+				if err != nil {
+					return nil, err
+				}
 				first := model3d.Triangle{other, edge[0], newMidpoint}
 				second := model3d.Triangle{other, newMidpoint, edge[1]}
 				shared := model3d.NewSegment(other, edge[0])
-				if triangleSegmentOrientation(&first, shared) != triangleSegmentOrientation(triangle, shared) {
+				firstOrientation, err := triangleSegmentOrientation(&first, shared)
+				if err != nil {
+					return nil, err
+				}
+				originalOrientation, err := triangleSegmentOrientation(triangle, shared)
+				if err != nil {
+					return nil, err
+				}
+				if firstOrientation != originalOrientation {
 					first[0], first[1] = first[1], first[0]
 					second[0], second[1] = second[1], second[0]
 				}
@@ -898,19 +950,25 @@ func separateContactEdges(options Options, mesh *model3d.Mesh, tol float64) *mod
 				result.Add(&first)
 				result.Add(&second)
 			}
-			checkComplexity("edge-contact regularization triangles", result.NumTriangles(), options.MaxOutputTriangles)
+			if err := checkComplexity("edge-contact regularization triangles", result.NumTriangles(), options.MaxOutputTriangles); err != nil {
+				return nil, err
+			}
 		}
 	}
-	return result
+	return result, nil
 }
 
-func pairContactEdgeTriangles(edge model3d.Segment, triangles []*model3d.Triangle) ([][2]*model3d.Triangle, []model3d.Coord3D) {
+func pairContactEdgeTriangles(edge model3d.Segment, triangles []*model3d.Triangle) ([][2]*model3d.Triangle, []model3d.Coord3D, error) {
 	axis := edge[0].Sub(edge[1]).Normalize()
 	basis1, basis2 := axis.OrthoBasis()
 	midpoint := edge.Mid()
 	angular := make([]contactEdgeTriangle, len(triangles))
 	for i, triangle := range triangles {
-		triangleVector := contactEdgeOtherVertex(edge, triangle).Sub(midpoint).Normalize()
+		other, err := contactEdgeOtherVertex(edge, triangle)
+		if err != nil {
+			return nil, nil, err
+		}
+		triangleVector := other.Sub(midpoint).Normalize()
 		x, y := basis1.Dot(triangleVector), basis2.Dot(triangleVector)
 		normal := triangle.Normal()
 		normalX, normalY := basis1.Dot(normal), basis2.Dot(normal)
@@ -936,8 +994,15 @@ func pairContactEdgeTriangles(edge model3d.Segment, triangles []*model3d.Triangl
 	}
 	for i := 0; i < len(angular); i += 2 {
 		for j := i + 1; j < len(angular); j++ {
-			if triangleSegmentOrientation(angular[i].triangle, edge) !=
-				triangleSegmentOrientation(angular[j].triangle, edge) {
+			firstOrientation, err := triangleSegmentOrientation(angular[i].triangle, edge)
+			if err != nil {
+				return nil, nil, err
+			}
+			secondOrientation, err := triangleSegmentOrientation(angular[j].triangle, edge)
+			if err != nil {
+				return nil, nil, err
+			}
+			if firstOrientation != secondOrientation {
 				angular[i+1], angular[j] = angular[j], angular[i+1]
 				break
 			}
@@ -951,25 +1016,25 @@ func pairContactEdgeTriangles(edge model3d.Segment, triangles []*model3d.Triangl
 		directions = append(directions,
 			basis1.Scale(math.Cos(theta)).Add(basis2.Scale(math.Sin(theta))))
 	}
-	return groups, directions
+	return groups, directions, nil
 }
 
-func contactEdgeOtherVertex(edge model3d.Segment, triangle *model3d.Triangle) model3d.Coord3D {
+func contactEdgeOtherVertex(edge model3d.Segment, triangle *model3d.Triangle) (model3d.Coord3D, error) {
 	for _, point := range triangle {
 		if point != edge[0] && point != edge[1] {
-			return point
+			return point, nil
 		}
 	}
-	panic("meshbool: degenerate triangle on contact edge")
+	return model3d.Coord3D{}, &TopologyError{Problem: "degenerate triangle on contact edge"}
 }
 
-func triangleSegmentOrientation(triangle *model3d.Triangle, segment model3d.Segment) bool {
+func triangleSegmentOrientation(triangle *model3d.Triangle, segment model3d.Segment) (bool, error) {
 	for i, point := range triangle {
 		if point == segment[0] {
-			return triangle[(i+2)%3] == segment[1]
+			return triangle[(i+2)%3] == segment[1], nil
 		}
 	}
-	panic("meshbool: segment is not in triangle")
+	return false, &TopologyError{Problem: "segment is not in triangle"}
 }
 
 func separateContactComponents(mesh *model3d.Mesh, tol float64) *model3d.Mesh {
