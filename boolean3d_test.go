@@ -62,6 +62,34 @@ func TestBoxBooleans(t *testing.T) {
 	}
 }
 
+func TestEqualCubesShiftedByTenPercent(t *testing.T) {
+	const width = 2.0
+	shift := width * 0.1
+	a := model3d.NewMeshRect(model3d.Coord3D{}, model3d.Ones(width))
+	bMin := model3d.X(shift)
+	b := model3d.NewMeshRect(bMin, bMin.Add(model3d.Ones(width)))
+
+	cubeVolume := width * width * width
+	overlapVolume := (width - shift) * width * width
+	tests := []struct {
+		name string
+		mesh *model3d.Mesh
+		want float64
+	}{
+		{"union", mustUnion3D(t, a, b), 2*cubeVolume - overlapVolume},
+		{"intersection", mustIntersection3D(t, a, b), overlapVolume},
+		{"difference", mustDifference3D(t, a, b), cubeVolume - overlapVolume},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			assertValidMesh3D(t, test.mesh)
+			if got := test.mesh.Volume(); math.Abs(got-test.want) > cubeVolume*1e-8 {
+				t.Fatalf("volume: got %g want %g", got, test.want)
+			}
+		})
+	}
+}
+
 func TestCoincidentBoxes(t *testing.T) {
 	a := model3d.NewMeshRect(model3d.XYZ(-1, -1, -1), model3d.XYZ(1, 1, 1))
 	b := a.DeepCopy()
