@@ -1,4 +1,4 @@
-package model2d
+package bool2d
 
 import (
 	"math"

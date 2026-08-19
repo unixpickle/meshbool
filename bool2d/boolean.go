@@ -1,11 +1,11 @@
-// Package model2d implements topology-preserving boolean operations on
+// Package bool2d implements topology-preserving boolean operations on
 // github.com/unixpickle/model3d/model2d meshes.
 //
 // Inputs are interpreted as polygon boundaries. They may contain multiple
 // connected components and holes, but should be closed. Output segments are
 // oriented with the result interior on their right, matching model3d's mesh
 // convention.
-package model2d
+package bool2d
 
 import (
 	"fmt"
@@ -55,7 +55,7 @@ func normalizeOptions(options Options) (Options, error) {
 	}
 	for _, field := range fields {
 		if *field.value < 0 {
-			return Options{}, fmt.Errorf("meshbool/model2d: option %s must not be negative", field.name)
+			return Options{}, fmt.Errorf("meshbool/bool2d: option %s must not be negative", field.name)
 		}
 		if *field.value == 0 {
 			*field.value = *field.valueDefault
@@ -79,7 +79,7 @@ type ComplexityError struct {
 }
 
 func (c *ComplexityError) Error() string {
-	return fmt.Sprintf("meshbool/model2d: %s exceeds safety limit of %d", c.Stage, c.Limit)
+	return fmt.Sprintf("meshbool/bool2d: %s exceeds safety limit of %d", c.Stage, c.Limit)
 }
 
 // TopologyError indicates that numerical degeneracy prevented construction of
@@ -91,9 +91,9 @@ type TopologyError struct {
 
 func (t *TopologyError) Error() string {
 	if t.Count != 0 {
-		return fmt.Sprintf("meshbool/model2d: invalid output topology: %s (%d)", t.Problem, t.Count)
+		return fmt.Sprintf("meshbool/bool2d: invalid output topology: %s (%d)", t.Problem, t.Count)
 	}
-	return fmt.Sprintf("meshbool/model2d: invalid output topology: %s", t.Problem)
+	return fmt.Sprintf("meshbool/bool2d: invalid output topology: %s", t.Problem)
 }
 
 // Union computes the union of zero or more meshes.

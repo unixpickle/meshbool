@@ -19,7 +19,7 @@ i := meshbool.Intersection(a, b)
 d := meshbool.Difference(a, b)
 ```
 
-The corresponding planar API is in `github.com/unixpickle/meshbool/model2d`
+The corresponding planar API is in `github.com/unixpickle/meshbool/bool2d`
 and has the same `Union`, `Intersection`, and `Difference` names for
 `*model2d.Mesh` values.
 

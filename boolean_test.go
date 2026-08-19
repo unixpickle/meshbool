@@ -9,7 +9,7 @@ import (
 	"strconv"
 	"testing"
 
-	bool2d "github.com/unixpickle/meshbool/model2d"
+	"github.com/unixpickle/meshbool/bool2d"
 	"github.com/unixpickle/model3d/model3d"
 )
 
