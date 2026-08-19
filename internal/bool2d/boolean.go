@@ -96,13 +96,9 @@ func (t *TopologyError) Error() string {
 	return fmt.Sprintf("meshbool/bool2d: invalid output topology: %s", t.Problem)
 }
 
-// Union computes the union of zero or more meshes.
-func Union(meshes ...*model.Mesh) (*model.Mesh, error) {
-	return UnionWithOptions(DefaultOptions(), meshes...)
-}
-
-// UnionWithOptions computes a union with configurable safety limits.
-func UnionWithOptions(options Options, meshes ...*model.Mesh) (*model.Mesh, error) {
+// Union computes the union of zero or more meshes using the supplied safety
+// limits.
+func Union(options Options, meshes ...*model.Mesh) (*model.Mesh, error) {
 	options, err := normalizeOptions(options)
 	if err != nil {
 		return nil, err
@@ -110,15 +106,9 @@ func UnionWithOptions(options Options, meshes ...*model.Mesh) (*model.Mesh, erro
 	return boolean(options, booleanUnion, meshes)
 }
 
-// Intersection computes the intersection of zero or more meshes. With no
-// arguments, it returns an empty mesh.
-func Intersection(meshes ...*model.Mesh) (*model.Mesh, error) {
-	return IntersectionWithOptions(DefaultOptions(), meshes...)
-}
-
-// IntersectionWithOptions computes an intersection with configurable safety
-// limits.
-func IntersectionWithOptions(options Options, meshes ...*model.Mesh) (*model.Mesh, error) {
+// Intersection computes the intersection of zero or more meshes using the
+// supplied safety limits. With no meshes, it returns an empty mesh.
+func Intersection(options Options, meshes ...*model.Mesh) (*model.Mesh, error) {
 	options, err := normalizeOptions(options)
 	if err != nil {
 		return nil, err
@@ -126,14 +116,9 @@ func IntersectionWithOptions(options Options, meshes ...*model.Mesh) (*model.Mes
 	return boolean(options, booleanIntersection, meshes)
 }
 
-// Difference subtracts every mesh in subtract from the first mesh.
-func Difference(first *model.Mesh, subtract ...*model.Mesh) (*model.Mesh, error) {
-	return DifferenceWithOptions(DefaultOptions(), first, subtract...)
-}
-
-// DifferenceWithOptions computes a difference with configurable safety
-// limits.
-func DifferenceWithOptions(options Options, first *model.Mesh, subtract ...*model.Mesh) (*model.Mesh, error) {
+// Difference subtracts every mesh in subtract from the first mesh using the
+// supplied safety limits.
+func Difference(options Options, first *model.Mesh, subtract ...*model.Mesh) (*model.Mesh, error) {
 	options, err := normalizeOptions(options)
 	if err != nil {
 		return nil, err

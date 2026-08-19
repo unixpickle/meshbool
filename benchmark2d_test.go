@@ -1,4 +1,4 @@
-package bool2d
+package meshbool
 
 import (
 	"math"
@@ -12,7 +12,7 @@ func BenchmarkUnionRagged64(b *testing.B) {
 	c := benchmarkRaggedMesh(model.X(0.15), 64, 0.17)
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
-		if _, err := Union(a, c); err != nil {
+		if _, err := Union2D(DefaultOptions2D(), a, c); err != nil {
 			b.Fatal(err)
 		}
 	}

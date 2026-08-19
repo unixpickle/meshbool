@@ -8,29 +8,38 @@ flat surfaces are retained.
 ```go
 import (
     "github.com/unixpickle/meshbool"
+    "github.com/unixpickle/model3d/model2d"
     "github.com/unixpickle/model3d/model3d"
 )
 
 a := model3d.NewMeshRect(model3d.XYZ(0, 0, 0), model3d.XYZ(2, 2, 2))
 b := model3d.NewMeshRect(model3d.XYZ(1, 1, 1), model3d.XYZ(3, 3, 3))
+options := meshbool.DefaultOptions3D()
 
-u, err := meshbool.Union(a, b)
+u, err := meshbool.Union3D(options, a, b)
 if err != nil {
     return err
 }
-i, err := meshbool.Intersection(a, b)
+i, err := meshbool.Intersection3D(options, a, b)
 if err != nil {
     return err
 }
-d, err := meshbool.Difference(a, b)
+d, err := meshbool.Difference3D(options, a, b)
+if err != nil {
+    return err
+}
+
+a2D := model2d.NewMeshRect(model2d.XY(0, 0), model2d.XY(2, 2))
+b2D := model2d.NewMeshRect(model2d.XY(1, 1), model2d.XY(3, 3))
+u2D, err := meshbool.Union2D(meshbool.DefaultOptions2D(), a2D, b2D)
 if err != nil {
     return err
 }
 ```
 
-The corresponding planar API is in `github.com/unixpickle/meshbool/bool2d`
-and has the same `Union`, `Intersection`, and `Difference` names for
-`*model2d.Mesh` values.
+The root package provides `Union2D`, `Intersection2D`, and `Difference2D` for
+`*model2d.Mesh` values, and the corresponding `*3D` functions for
+`*model3d.Mesh` values.
 
 Inputs should be closed, consistently oriented manifold meshes. The operations
 do not mutate them. Outputs are welded, conformingly triangulated, consistently
@@ -44,7 +53,7 @@ Intersection arrangements can have output size quadratic or worse in the input
 size. Every operation stops at conservative internal expansion limits and
 returns `*meshbool.ComplexityError` rather than risking unbounded memory growth.
 Residual invalid-output conditions are returned as `*meshbool.TopologyError`.
-The planar package provides the same error types.
+Both dimensions use the same error types.
 
 The implementation is single-threaded. This makes its cost predictable and
 avoids multiplying peak memory use when several facets create dense
@@ -52,20 +61,19 @@ intersection arrangements.
 
 The 3-D defaults allow 200,000 triangles in each input mesh and cap retained
 surface fragments and output triangles at 200,000. Every guard can be tuned
-without changing the convenience APIs:
+through the options value:
 
 ```go
-options := meshbool.DefaultOptions()
+options := meshbool.DefaultOptions3D()
 options.MaxInputTriangles = 500_000
 options.MaxOutputTriangles = 500_000
 
-result, err := meshbool.UnionWithOptions(options, a, b)
+result, err := meshbool.Union3D(options, a, b)
 ```
 
 Zero-valued option fields inherit defaults; negative values are rejected. The
 3-D `PlanarOptions` field configures the 2-D work used to merge coplanar
-surfaces. The planar package also exposes its own `DefaultOptions` and
-`*WithOptions` functions.
+surfaces. Direct planar operations use `Options2D` and `DefaultOptions2D`.
 
 The ordinary test suite deliberately keeps the expensive 3-D randomized test
 bounded. Larger deterministic campaigns are opt-in, for example:

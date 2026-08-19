@@ -1,4 +1,3 @@
-// Package meshbool implements Union, Intersection, and Difference for model3d
-// triangle meshes. The bool2d subpackage provides the corresponding planar
-// mesh operations.
+// Package meshbool implements 2-D and 3-D union, intersection, and difference
+// operations for model3d meshes.
 package meshbool

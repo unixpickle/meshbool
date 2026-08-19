@@ -5,7 +5,7 @@ import (
 	"math"
 	"sort"
 
-	"github.com/unixpickle/meshbool/bool2d"
+	"github.com/unixpickle/meshbool/internal/bool2d"
 	model2d "github.com/unixpickle/model3d/model2d"
 	"github.com/unixpickle/model3d/model3d"
 )
@@ -19,35 +19,34 @@ const (
 	defaultMaxTriangleCandidatePairs = 5_000_000
 )
 
-// Options configures safety limits for boolean operations. A zero numeric
-// field uses the corresponding value from DefaultOptions. Negative values are
-// invalid. PlanarOptions controls coplanar surface processing.
-type Options struct {
+// Options3D configures safety limits for 3-D boolean operations. A zero
+// numeric field uses the corresponding value from DefaultOptions3D. Negative
+// values are invalid. PlanarOptions controls coplanar surface processing.
+type Options3D struct {
 	MaxInputTriangles         int
 	MaxFragmentsPerTriangle   int
 	MaxTotalFragments         int
 	MaxOutputTriangles        int
 	MaxContactEdgeTriangles   int
 	MaxTriangleCandidatePairs int
-	PlanarOptions             bool2d.Options
+	PlanarOptions             Options2D
 }
 
-// DefaultOptions returns the limits used by Union, Intersection, and
-// Difference.
-func DefaultOptions() Options {
-	return Options{
+// DefaultOptions3D returns the standard limits for 3-D operations.
+func DefaultOptions3D() Options3D {
+	return Options3D{
 		MaxInputTriangles:         defaultMaxInputTriangles,
 		MaxFragmentsPerTriangle:   defaultMaxFragmentsPerTriangle,
 		MaxTotalFragments:         defaultMaxTotalFragments,
 		MaxOutputTriangles:        defaultMaxOutputTriangles,
 		MaxContactEdgeTriangles:   defaultMaxContactEdgeTriangles,
 		MaxTriangleCandidatePairs: defaultMaxTriangleCandidatePairs,
-		PlanarOptions:             bool2d.DefaultOptions(),
+		PlanarOptions:             DefaultOptions2D(),
 	}
 }
 
-func normalizeOptions(options Options) (Options, error) {
-	defaults := DefaultOptions()
+func normalizeOptions3D(options Options3D) (Options3D, error) {
+	defaults := DefaultOptions3D()
 	fields := []struct {
 		name                string
 		value, valueDefault *int
@@ -61,25 +60,25 @@ func normalizeOptions(options Options) (Options, error) {
 	}
 	for _, field := range fields {
 		if *field.value < 0 {
-			return Options{}, fmt.Errorf("meshbool: option %s must not be negative", field.name)
+			return Options3D{}, fmt.Errorf("meshbool: 3D option %s must not be negative", field.name)
 		}
 		if *field.value == 0 {
 			*field.value = *field.valueDefault
 		}
 	}
-	if options.PlanarOptions == (bool2d.Options{}) {
+	if options.PlanarOptions == (Options2D{}) {
 		options.PlanarOptions = defaults.PlanarOptions
 	}
 	if err := options.PlanarOptions.Validate(); err != nil {
-		return Options{}, err
+		return Options3D{}, err
 	}
 	return options, nil
 }
 
 // Validate checks that no option is negative. Zero values are valid and mean
 // to use the corresponding default.
-func (o Options) Validate() error {
-	_, err := normalizeOptions(o)
+func (o Options3D) Validate() error {
+	_, err := normalizeOptions3D(o)
 	return err
 }
 
@@ -108,22 +107,17 @@ func (t *TopologyError) Error() string {
 	return fmt.Sprintf("meshbool: invalid output topology: %s", t.Problem)
 }
 
-// Union computes the closed-set union of zero or more triangle meshes.
-// Input meshes are not modified.
-func Union(meshes ...*model3d.Mesh) (*model3d.Mesh, error) {
-	return UnionWithOptions(DefaultOptions(), meshes...)
-}
-
-// UnionWithOptions computes a union with configurable safety limits.
-func UnionWithOptions(options Options, meshes ...*model3d.Mesh) (*model3d.Mesh, error) {
-	options, err := normalizeOptions(options)
+// Union3D computes the closed-set union of zero or more triangle meshes using
+// the supplied safety limits. Input meshes are not modified.
+func Union3D(options Options3D, meshes ...*model3d.Mesh) (*model3d.Mesh, error) {
+	options, err := normalizeOptions3D(options)
 	if err != nil {
 		return nil, err
 	}
-	return union(options, meshes...)
+	return union3D(options, meshes...)
 }
 
-func union(options Options, meshes ...*model3d.Mesh) (*model3d.Mesh, error) {
+func union3D(options Options3D, meshes ...*model3d.Mesh) (*model3d.Mesh, error) {
 	meshes = nonNilMeshes(meshes)
 	if len(meshes) == 0 {
 		return model3d.NewMesh(), nil
@@ -142,23 +136,18 @@ func union(options Options, meshes ...*model3d.Mesh) (*model3d.Mesh, error) {
 	return result, nil
 }
 
-// Intersection computes the intersection of zero or more triangle meshes.
-// With no arguments, it returns an empty mesh. Input meshes are not modified.
-func Intersection(meshes ...*model3d.Mesh) (*model3d.Mesh, error) {
-	return IntersectionWithOptions(DefaultOptions(), meshes...)
-}
-
-// IntersectionWithOptions computes an intersection with configurable safety
-// limits.
-func IntersectionWithOptions(options Options, meshes ...*model3d.Mesh) (*model3d.Mesh, error) {
-	options, err := normalizeOptions(options)
+// Intersection3D computes the intersection of zero or more triangle meshes
+// using the supplied safety limits. With no meshes, it returns an empty mesh.
+// Input meshes are not modified.
+func Intersection3D(options Options3D, meshes ...*model3d.Mesh) (*model3d.Mesh, error) {
+	options, err := normalizeOptions3D(options)
 	if err != nil {
 		return nil, err
 	}
-	return intersection(options, meshes...)
+	return intersection3D(options, meshes...)
 }
 
-func intersection(options Options, meshes ...*model3d.Mesh) (*model3d.Mesh, error) {
+func intersection3D(options Options3D, meshes ...*model3d.Mesh) (*model3d.Mesh, error) {
 	meshes = nonNilMeshes(meshes)
 	if len(meshes) == 0 {
 		return model3d.NewMesh(), nil
@@ -180,24 +169,17 @@ func intersection(options Options, meshes ...*model3d.Mesh) (*model3d.Mesh, erro
 	return result, nil
 }
 
-// Difference subtracts every mesh in subtract from first. Input meshes are not
-// modified.
-func Difference(first *model3d.Mesh, subtract ...*model3d.Mesh) (*model3d.Mesh, error) {
-	return DifferenceWithOptions(DefaultOptions(), first, subtract...)
-}
-
-// DifferenceWithOptions computes a difference with configurable safety
-// limits.
-func DifferenceWithOptions(options Options, first *model3d.Mesh,
-	subtract ...*model3d.Mesh) (*model3d.Mesh, error) {
-	options, err := normalizeOptions(options)
+// Difference3D subtracts every mesh in subtract from first using the supplied
+// safety limits. Input meshes are not modified.
+func Difference3D(options Options3D, first *model3d.Mesh, subtract ...*model3d.Mesh) (*model3d.Mesh, error) {
+	options, err := normalizeOptions3D(options)
 	if err != nil {
 		return nil, err
 	}
-	return difference(options, first, subtract...)
+	return difference3D(options, first, subtract...)
 }
 
-func difference(options Options, first *model3d.Mesh, subtract ...*model3d.Mesh) (*model3d.Mesh, error) {
+func difference3D(options Options3D, first *model3d.Mesh, subtract ...*model3d.Mesh) (*model3d.Mesh, error) {
 	if first == nil {
 		return model3d.NewMesh(), nil
 	}
@@ -228,7 +210,7 @@ func checkComplexity(stage string, count, limit int) error {
 	return nil
 }
 
-func checkInputMeshes(options Options, meshes []*model3d.Mesh) error {
+func checkInputMeshes(options Options3D, meshes []*model3d.Mesh) error {
 	for _, mesh := range meshes {
 		if err := checkComplexity("triangles in one input mesh", mesh.NumTriangles(), options.MaxInputTriangles); err != nil {
 			return err
@@ -245,7 +227,7 @@ const (
 	meshDifference
 )
 
-func booleanMeshPair(options Options, a, b *model3d.Mesh, kind meshBooleanKind) (*model3d.Mesh, error) {
+func booleanMeshPair(options Options3D, a, b *model3d.Mesh, kind meshBooleanKind) (*model3d.Mesh, error) {
 	if err := checkInputMeshes(options, []*model3d.Mesh{a, b}); err != nil {
 		return nil, err
 	}
@@ -280,7 +262,7 @@ func booleanMeshPair(options Options, a, b *model3d.Mesh, kind meshBooleanKind) 
 	return booleanMeshPairLocal(options, a, b, kind)
 }
 
-func booleanMeshPairLocal(options Options, a, b *model3d.Mesh, kind meshBooleanKind) (*model3d.Mesh, error) {
+func booleanMeshPairLocal(options Options3D, a, b *model3d.Mesh, kind meshBooleanKind) (*model3d.Mesh, error) {
 	if err := checkComplexity("triangles in one input mesh", a.NumTriangles(), options.MaxInputTriangles); err != nil {
 		return nil, err
 	}
@@ -318,7 +300,7 @@ func booleanMeshPairLocal(options Options, a, b *model3d.Mesh, kind meshBooleanK
 	return polygonsMesh(options, fragments, scale)
 }
 
-func splitAndClassifyMesh(options Options, triangles []*model3d.Triangle, other model3d.TriangleCollider, otherIndex *triangleIndex,
+func splitAndClassifyMesh(options Options3D, triangles []*model3d.Triangle, other model3d.TriangleCollider, otherIndex *triangleIndex,
 	solidA, solidB model3d.Solid, kind meshBooleanKind, tol float64, sourceA bool,
 	candidatePairs *int) ([]*polygon, error) {
 	var result []*polygon
@@ -616,7 +598,7 @@ type coplanarGroup struct {
 
 type planeGroupKey [4]int64
 
-func polygonsMesh(options Options, polygons []*polygon, scale float64) (*model3d.Mesh, error) {
+func polygonsMesh(options Options3D, polygons []*polygon, scale float64) (*model3d.Mesh, error) {
 	tol := math.Max(scale*1e-9, math.SmallestNonzeroFloat64*1024)
 	var groups []*coplanarGroup
 	normalStep := 1e-10
@@ -673,11 +655,11 @@ func polygonsMesh(options Options, polygons []*polygon, scale float64) (*model3d
 
 	var raw []model3d.Triangle
 	for _, group := range groups {
-		positive, err := bool2d.UnionWithOptions(options.PlanarOptions, group.positive...)
+		positive, err := bool2d.Union(options.PlanarOptions.internal(), group.positive...)
 		if err != nil {
 			return nil, convertPlanarError(err)
 		}
-		negative, err := bool2d.UnionWithOptions(options.PlanarOptions, group.negative...)
+		negative, err := bool2d.Union(options.PlanarOptions.internal(), group.negative...)
 		if err != nil {
 			return nil, convertPlanarError(err)
 		}
@@ -763,7 +745,7 @@ func triangulatePlanarMesh(mesh *model2d.Mesh) ([][3]model2d.Coord, error) {
 	return model2d.TriangulateMesh(mesh), nil
 }
 
-func finalizeTriangles(options Options, raw []model3d.Triangle, tol float64) (*model3d.Mesh, error) {
+func finalizeTriangles(options Options3D, raw []model3d.Triangle, tol float64) (*model3d.Mesh, error) {
 	if err := checkComplexity("output triangles", len(raw), options.MaxOutputTriangles); err != nil {
 		return nil, err
 	}
@@ -880,7 +862,7 @@ type contactEdgeTriangle struct {
 // one slightly displaced V-shaped edge per oriented surface pair. This turns
 // an exact edge contact into point contacts at its endpoints, which the later
 // vertex cleanup can resolve without opening either surface.
-func separateContactEdges(options Options, mesh *model3d.Mesh, tol float64) (*model3d.Mesh, error) {
+func separateContactEdges(options Options3D, mesh *model3d.Mesh, tol float64) (*model3d.Mesh, error) {
 	edgeCounts := map[model3d.Segment]int{}
 	mesh.Iterate(func(triangle *model3d.Triangle) {
 		for i := range triangle {

@@ -1,16 +1,17 @@
-package bool2d
+package meshbool
 
 import (
 	"math"
 	"math/rand"
 	"testing"
 
+	"github.com/unixpickle/meshbool/internal/bool2d"
 	model "github.com/unixpickle/model3d/model2d"
 )
 
 func mustUnion2D(t testing.TB, meshes ...*model.Mesh) *model.Mesh {
 	t.Helper()
-	result, err := Union(meshes...)
+	result, err := Union2D(DefaultOptions2D(), meshes...)
 	if err != nil {
 		t.Fatalf("Union failed: %v", err)
 	}
@@ -19,7 +20,7 @@ func mustUnion2D(t testing.TB, meshes ...*model.Mesh) *model.Mesh {
 
 func mustIntersection2D(t testing.TB, meshes ...*model.Mesh) *model.Mesh {
 	t.Helper()
-	result, err := Intersection(meshes...)
+	result, err := Intersection2D(DefaultOptions2D(), meshes...)
 	if err != nil {
 		t.Fatalf("Intersection failed: %v", err)
 	}
@@ -28,7 +29,7 @@ func mustIntersection2D(t testing.TB, meshes ...*model.Mesh) *model.Mesh {
 
 func mustDifference2D(t testing.TB, first *model.Mesh, subtract ...*model.Mesh) *model.Mesh {
 	t.Helper()
-	result, err := Difference(first, subtract...)
+	result, err := Difference2D(DefaultOptions2D(), first, subtract...)
 	if err != nil {
 		t.Fatalf("Difference failed: %v", err)
 	}
@@ -267,9 +268,9 @@ func TestErrorReturningAPIs(t *testing.T) {
 	a := model.NewMeshRect(model.XY(0, 0), model.XY(1, 1))
 	b := model.NewMeshRect(model.XY(0.5, 0.5), model.XY(1.5, 1.5))
 	for name, operation := range map[string]func() (*model.Mesh, error){
-		"union":        func() (*model.Mesh, error) { return Union(a, b) },
-		"intersection": func() (*model.Mesh, error) { return Intersection(a, b) },
-		"difference":   func() (*model.Mesh, error) { return Difference(a, b) },
+		"union":        func() (*model.Mesh, error) { return Union2D(DefaultOptions2D(), a, b) },
+		"intersection": func() (*model.Mesh, error) { return Intersection2D(DefaultOptions2D(), a, b) },
+		"difference":   func() (*model.Mesh, error) { return Difference2D(DefaultOptions2D(), a, b) },
 	} {
 		t.Run(name, func(t *testing.T) {
 			result, err := operation()
@@ -282,21 +283,21 @@ func TestErrorReturningAPIs(t *testing.T) {
 }
 
 func TestOptions(t *testing.T) {
-	defaults := DefaultOptions()
+	defaults := DefaultOptions2D()
 	if defaults.MaxInputSegments != 10_000 || defaults.MaxIntersectionCuts != 250_000 {
 		t.Fatalf("unexpected defaults: %#v", defaults)
 	}
 	a := model.NewMeshRect(model.XY(0, 0), model.XY(1, 1))
 	b := model.NewMeshRect(model.XY(0.5, 0.5), model.XY(1.5, 1.5))
-	result, err := UnionWithOptions(Options{}, a, b)
+	result, err := Union2D(Options2D{}, a, b)
 	if err != nil {
 		t.Fatalf("zero options did not use defaults: %v", err)
 	}
 	assertValidMesh(t, result)
 
-	limited := DefaultOptions()
+	limited := DefaultOptions2D()
 	limited.MaxInputSegments = a.NumSegments() - 1
-	result, err = UnionWithOptions(limited, a)
+	result, err = Union2D(limited, a)
 	if result != nil {
 		t.Fatal("limited operation returned a mesh")
 	}
@@ -305,22 +306,21 @@ func TestOptions(t *testing.T) {
 		t.Fatalf("low input limit returned %#v", err)
 	}
 
-	invalid := DefaultOptions()
+	invalid := DefaultOptions2D()
 	invalid.MaxIntersectionPairs = -1
-	if result, err = UnionWithOptions(invalid, a); result != nil || err == nil {
+	if result, err = Union2D(invalid, a); result != nil || err == nil {
 		t.Fatalf("negative option returned result=%v err=%v", result, err)
 	}
 }
 
 func TestTopologyFailureReturnsError(t *testing.T) {
-	mesh := model.NewMesh()
-	mesh.Add(&model.Segment{model.XY(0, 0), model.XY(1, 0)})
-	result, err := validateResultTopology(DefaultOptions(), mesh)
-	if result != nil {
-		t.Fatal("topology failure returned a mesh")
-	}
-	if _, ok := err.(*TopologyError); !ok {
+	err := convert2DError(&bool2d.TopologyError{Problem: "test topology", Count: 3})
+	topology, ok := err.(*TopologyError)
+	if !ok {
 		t.Fatalf("topology failure returned %T, want *TopologyError", err)
+	}
+	if topology.Problem != "2D test topology" || topology.Count != 3 {
+		t.Fatalf("unexpected converted error: %#v", topology)
 	}
 }
 
@@ -362,7 +362,7 @@ func assertValidMesh(t *testing.T, m *model.Mesh) {
 			}
 			v1, v2 := otherFirst.Sub(shared), otherSecond.Sub(shared)
 			crossingTolerance := 1e-12 * math.Max(v1.Norm()*v2.Norm(), math.SmallestNonzeroFloat64)
-			if math.Abs(cross(v1, v2)) <= crossingTolerance && v1.Dot(v2) > 0 {
+			if math.Abs(cross2D(v1, v2)) <= crossingTolerance && v1.Dot(v2) > 0 {
 				t.Fatalf("mesh has overlapping segments: %v and %v", *first, *second)
 			}
 		}

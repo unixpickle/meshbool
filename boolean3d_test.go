@@ -9,13 +9,13 @@ import (
 	"strconv"
 	"testing"
 
-	"github.com/unixpickle/meshbool/bool2d"
+	"github.com/unixpickle/meshbool/internal/bool2d"
 	"github.com/unixpickle/model3d/model3d"
 )
 
 func mustUnion3D(t testing.TB, meshes ...*model3d.Mesh) *model3d.Mesh {
 	t.Helper()
-	result, err := Union(meshes...)
+	result, err := Union3D(DefaultOptions3D(), meshes...)
 	if err != nil {
 		t.Fatalf("Union failed: %v", err)
 	}
@@ -24,7 +24,7 @@ func mustUnion3D(t testing.TB, meshes ...*model3d.Mesh) *model3d.Mesh {
 
 func mustIntersection3D(t testing.TB, meshes ...*model3d.Mesh) *model3d.Mesh {
 	t.Helper()
-	result, err := Intersection(meshes...)
+	result, err := Intersection3D(DefaultOptions3D(), meshes...)
 	if err != nil {
 		t.Fatalf("Intersection failed: %v", err)
 	}
@@ -33,7 +33,7 @@ func mustIntersection3D(t testing.TB, meshes ...*model3d.Mesh) *model3d.Mesh {
 
 func mustDifference3D(t testing.TB, first *model3d.Mesh, subtract ...*model3d.Mesh) *model3d.Mesh {
 	t.Helper()
-	result, err := Difference(first, subtract...)
+	result, err := Difference3D(DefaultOptions3D(), first, subtract...)
 	if err != nil {
 		t.Fatalf("Difference failed: %v", err)
 	}
@@ -327,9 +327,9 @@ func TestErrorReturningAPIs3D(t *testing.T) {
 	a := model3d.NewMeshRect(model3d.Coord3D{}, model3d.Ones(1))
 	b := model3d.NewMeshRect(model3d.Ones(0.5), model3d.Ones(1.5))
 	for name, operation := range map[string]func() (*model3d.Mesh, error){
-		"union":        func() (*model3d.Mesh, error) { return Union(a, b) },
-		"intersection": func() (*model3d.Mesh, error) { return Intersection(a, b) },
-		"difference":   func() (*model3d.Mesh, error) { return Difference(a, b) },
+		"union":        func() (*model3d.Mesh, error) { return Union3D(DefaultOptions3D(), a, b) },
+		"intersection": func() (*model3d.Mesh, error) { return Intersection3D(DefaultOptions3D(), a, b) },
+		"difference":   func() (*model3d.Mesh, error) { return Difference3D(DefaultOptions3D(), a, b) },
 	} {
 		t.Run(name, func(t *testing.T) {
 			result, err := operation()
@@ -342,22 +342,22 @@ func TestErrorReturningAPIs3D(t *testing.T) {
 }
 
 func TestOptions3D(t *testing.T) {
-	defaults := DefaultOptions()
+	defaults := DefaultOptions3D()
 	if defaults.MaxInputTriangles != 200_000 || defaults.MaxOutputTriangles != 200_000 ||
 		defaults.MaxTotalFragments != 200_000 {
 		t.Fatalf("unexpected triangle defaults: %#v", defaults)
 	}
 	a := model3d.NewMeshRect(model3d.Coord3D{}, model3d.Ones(1))
 	b := model3d.NewMeshRect(model3d.Ones(0.5), model3d.Ones(1.5))
-	result, err := UnionWithOptions(Options{}, a, b)
+	result, err := Union3D(Options3D{}, a, b)
 	if err != nil {
 		t.Fatalf("zero options did not use defaults: %v", err)
 	}
 	assertValidMesh3D(t, result)
 
-	limited := DefaultOptions()
+	limited := DefaultOptions3D()
 	limited.MaxInputTriangles = a.NumTriangles() - 1
-	result, err = UnionWithOptions(limited, a)
+	result, err = Union3D(limited, a)
 	if result != nil {
 		t.Fatal("limited operation returned a mesh")
 	}
@@ -366,15 +366,15 @@ func TestOptions3D(t *testing.T) {
 		t.Fatalf("low input limit returned %#v", err)
 	}
 
-	invalid := DefaultOptions()
+	invalid := DefaultOptions3D()
 	invalid.MaxOutputTriangles = -1
-	if result, err = UnionWithOptions(invalid, a); result != nil || err == nil {
+	if result, err = Union3D(invalid, a); result != nil || err == nil {
 		t.Fatalf("negative option returned result=%v err=%v", result, err)
 	}
 
-	planarLimited := DefaultOptions()
+	planarLimited := DefaultOptions3D()
 	planarLimited.PlanarOptions.MaxInputSegments = 1
-	result, err = UnionWithOptions(planarLimited, a, b)
+	result, err = Union3D(planarLimited, a, b)
 	complexity, ok = err.(*ComplexityError)
 	if result != nil || !ok || complexity.Stage != "planar input segments" {
 		t.Fatalf("planar limit was not propagated: result=%v err=%#v", result, err)
