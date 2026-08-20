@@ -10,12 +10,14 @@ package bool2d
 import (
 	"fmt"
 	"math"
+	"math/big"
 	"sort"
 
 	model "github.com/unixpickle/model3d/model2d"
 )
 
 const (
+	floatEpsilon                = 2.220446049250313e-16
 	defaultMaxInputSegments     = 10_000
 	defaultMaxIntersectionCuts  = 250_000
 	defaultMaxIntersectionPairs = 5_000_000
@@ -161,6 +163,18 @@ func boolean(options Options, kind booleanKind, meshes []*model.Mesh) (*model.Me
 		if totalSegments > options.MaxInputSegments {
 			return nil, &ComplexityError{Stage: "input segments", Limit: options.MaxInputSegments}
 		}
+		var nonFinite bool
+		mesh.Iterate(func(segment *model.Segment) {
+			for _, point := range segment {
+				if math.IsNaN(point.X) || math.IsNaN(point.Y) ||
+					math.IsInf(point.X, 0) || math.IsInf(point.Y, 0) {
+					nonFinite = true
+				}
+			}
+		})
+		if nonFinite {
+			return nil, fmt.Errorf("meshbool/bool2d: input mesh contains a non-finite coordinate")
+		}
 	}
 	segments := collectSegments(meshes)
 	if len(segments) == 0 {
@@ -197,10 +211,7 @@ func boolean(options Options, kind booleanKind, meshes []*model.Mesh) (*model.Me
 		}
 		mid := a.Mid(b)
 		rightUnit := model.XY(delta.Y/length, -delta.X/length)
-		offset := math.Max(tol*8, length*1e-8)
-		// Keep probes within the local edge neighborhood, but never force an
-		// ordinary short edge's probe below the operation tolerance.
-		offset = math.Min(offset, length*0.25)
+		offset := localProbeOffset(mid, length, classifiers, tol)
 		right, err := evalBoolean(kind, classifiers, mid.Add(rightUnit.Scale(offset)))
 		if err != nil {
 			return nil, err
@@ -223,6 +234,18 @@ func boolean(options Options, kind booleanKind, meshes []*model.Mesh) (*model.Me
 		return nil, err
 	}
 	return validateResultTopology(options, result)
+}
+
+func localProbeOffset(point model.Coord, length float64, classifiers []pointClassifier, tol float64) float64 {
+	offset := math.Min(math.Max(tol*8, length*1e-8), length*0.25)
+	clearance := math.Inf(1)
+	for _, classifier := range classifiers {
+		clearance = classifier.root.nearestBoundaryDistance(point, tol, clearance)
+	}
+	if !math.IsInf(clearance, 1) {
+		offset = math.Min(offset, clearance*0.25)
+	}
+	return offset
 }
 
 func validateResultTopology(options Options, mesh *model.Mesh) (*model.Mesh, error) {
@@ -281,32 +304,57 @@ func invalidSegmentIntersection(a, b *model.Segment) bool {
 			if point == other {
 				first := a[1-i].Sub(point)
 				second := b[1-j].Sub(point)
-				return cross(first, second) == 0 && first.Dot(second) > 0
+				// Overlap beyond the common endpoint requires both direction
+				// components to occupy compatible half-axes. This cheaply rejects
+				// ordinary consecutive edges, including exactly straight ones,
+				// before the exact collinearity fallback.
+				if first.X < 0 && second.X > 0 || first.X > 0 && second.X < 0 ||
+					first.Y < 0 && second.Y > 0 || first.Y > 0 && second.Y < 0 {
+					return false
+				}
+				return filteredOrientation2D(model.Coord{}, first, second) == 0
 			}
 		}
 	}
-	p, r := a[0], a[1].Sub(a[0])
-	q, s := b[0], b[1].Sub(b[0])
-	determinant := cross(r, s)
-	if determinant != 0 {
-		delta := q.Sub(p)
-		t := cross(delta, s) / determinant
-		u := cross(delta, r) / determinant
-		return t >= 0 && t <= 1 && u >= 0 && u <= 1
-	}
-	if cross(q.Sub(p), r) != 0 {
-		return false
-	}
-	denominator := r.NormSquared()
-	if denominator == 0 {
+	o1 := filteredOrientation2D(a[0], a[1], b[0])
+	o2 := filteredOrientation2D(a[0], a[1], b[1])
+	o3 := filteredOrientation2D(b[0], b[1], a[0])
+	o4 := filteredOrientation2D(b[0], b[1], a[1])
+	if o1 == 0 && pointInSegmentBounds2D(b[0], a) ||
+		o2 == 0 && pointInSegmentBounds2D(b[1], a) ||
+		o3 == 0 && pointInSegmentBounds2D(a[0], b) ||
+		o4 == 0 && pointInSegmentBounds2D(a[1], b) {
 		return true
 	}
-	t0 := q.Sub(p).Dot(r) / denominator
-	t1 := b[1].Sub(p).Dot(r) / denominator
-	if t0 > t1 {
-		t0, t1 = t1, t0
+	return o1 != 0 && o2 != 0 && o3 != 0 && o4 != 0 && o1 != o2 && o3 != o4
+}
+
+func pointInSegmentBounds2D(point model.Coord, segment *model.Segment) bool {
+	min, max := segment.Min(), segment.Max()
+	return point.X >= min.X && point.X <= max.X && point.Y >= min.Y && point.Y <= max.Y
+}
+
+func filteredOrientation2D(a, b, c model.Coord) int {
+	abx, aby := b.X-a.X, b.Y-a.Y
+	acx, acy := c.X-a.X, c.Y-a.Y
+	left, right := abx*acy, aby*acx
+	determinant := left - right
+	errorBound := (3 + 16*floatEpsilon) * floatEpsilon * (math.Abs(left) + math.Abs(right))
+	if determinant > errorBound {
+		return 1
 	}
-	return math.Max(0, t0) <= math.Min(1, t1)
+	if determinant < -errorBound {
+		return -1
+	}
+	ax, ay := new(big.Rat).SetFloat64(a.X), new(big.Rat).SetFloat64(a.Y)
+	abxExact := new(big.Rat).Sub(new(big.Rat).SetFloat64(b.X), ax)
+	abyExact := new(big.Rat).Sub(new(big.Rat).SetFloat64(b.Y), ay)
+	acxExact := new(big.Rat).Sub(new(big.Rat).SetFloat64(c.X), ax)
+	acyExact := new(big.Rat).Sub(new(big.Rat).SetFloat64(c.Y), ay)
+	return new(big.Rat).Sub(
+		new(big.Rat).Mul(abxExact, acyExact),
+		new(big.Rat).Mul(abyExact, acxExact),
+	).Sign()
 }
 
 // regularizePointContacts separates boundary loops which meet at an exact
@@ -521,7 +569,7 @@ func meshTolerance(segments []*sourceSegment) float64 {
 	// This is large enough to coalesce independently-computed intersections,
 	// but small enough to retain ordinary modeling details.
 	ulp := math.Nextafter(maxAbs, math.Inf(1)) - maxAbs
-	return math.Max(math.Max(scale*1e-10, ulp*16), math.SmallestNonzeroFloat64*1024)
+	return math.Max(math.Max(scale*1e-12, ulp*16), math.SmallestNonzeroFloat64*1024)
 }
 
 func splitSegments(options Options, segments []*sourceSegment, tol float64) error {
@@ -726,6 +774,44 @@ type classifierNode struct {
 	min, max    model.Coord
 	segments    []*model.Segment
 	left, right *classifierNode
+}
+
+func (p *classifierNode) nearestBoundaryDistance(point model.Coord, ignoreBelow, best float64) float64 {
+	if p == nil || pointBoundsDistance(point, p.min, p.max) >= best {
+		return best
+	}
+	if p.left != nil {
+		leftDistance := pointBoundsDistance(point, p.left.min, p.left.max)
+		rightDistance := pointBoundsDistance(point, p.right.min, p.right.max)
+		if leftDistance < rightDistance {
+			best = p.left.nearestBoundaryDistance(point, ignoreBelow, best)
+			return p.right.nearestBoundaryDistance(point, ignoreBelow, best)
+		}
+		best = p.right.nearestBoundaryDistance(point, ignoreBelow, best)
+		return p.left.nearestBoundaryDistance(point, ignoreBelow, best)
+	}
+	for _, segment := range p.segments {
+		distance := segment.Dist(point)
+		if distance > ignoreBelow && distance < best {
+			best = distance
+		}
+	}
+	return best
+}
+
+func pointBoundsDistance(point, min, max model.Coord) float64 {
+	dx, dy := 0.0, 0.0
+	if point.X < min.X {
+		dx = min.X - point.X
+	} else if point.X > max.X {
+		dx = point.X - max.X
+	}
+	if point.Y < min.Y {
+		dy = min.Y - point.Y
+	} else if point.Y > max.Y {
+		dy = point.Y - max.Y
+	}
+	return math.Hypot(dx, dy)
 }
 
 func newClassifierNode(segments []*model.Segment) *classifierNode {

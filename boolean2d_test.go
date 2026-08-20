@@ -1,6 +1,7 @@
 package meshbool
 
 import (
+	"fmt"
 	"math"
 	"math/rand"
 	"testing"
@@ -220,6 +221,59 @@ func TestThinOverlap(t *testing.T) {
 	}
 }
 
+func TestThinMeshIdentity(t *testing.T) {
+	// Side probes used to scale with edge length, so both probes for a long,
+	// thin rectangle could jump outside the shape and leave an open result.
+	for _, width := range []float64{1e-8, 1e-10, 2e-12} {
+		t.Run(fmt.Sprintf("%g", width), func(t *testing.T) {
+			input := model.NewMeshRect(model.Coord{}, model.XY(1, width))
+			result := mustUnion2D(t, input)
+			assertValidMesh(t, result)
+			if result.NumSegments() != input.NumSegments() {
+				t.Fatalf("segment count: got %d want %d", result.NumSegments(), input.NumSegments())
+			}
+			if area := result.Area(); math.Abs(area-width) > width*1e-8 {
+				t.Fatalf("area: got %g want %g", area, width)
+			}
+		})
+	}
+}
+
+func TestSlenderRectangleBooleans(t *testing.T) {
+	// This combines a feature below the old relative tolerance with an
+	// ordinary rotated feature, exercising both intersection splitting and
+	// adaptive side classification.
+	a := orientedRect2D(model.Coord{}, 1, 1e-10, 0)
+	b := orientedRect2D(model.XY(0.07, 1e-11), 1, 1e-5, 0.49825534708211694)
+	u := mustUnion2D(t, a, b)
+	i := mustIntersection2D(t, a, b)
+	d := mustDifference2D(t, a, b)
+	for _, result := range []*model.Mesh{u, i, d} {
+		assertValidMesh(t, result)
+	}
+	if delta := math.Abs(u.Area() + i.Area() - a.Area() - b.Area()); delta > 1e-12 {
+		t.Fatalf("inclusion-exclusion error: %g", delta)
+	}
+	if delta := math.Abs(d.Area() + i.Area() - a.Area()); delta > 1e-14 {
+		t.Fatalf("partition error: %g", delta)
+	}
+}
+
+func TestNonFiniteInput2D(t *testing.T) {
+	for name, value := range map[string]float64{
+		"nan": math.NaN(), "positive_inf": math.Inf(1), "negative_inf": math.Inf(-1),
+	} {
+		t.Run(name, func(t *testing.T) {
+			input := model.NewMesh()
+			input.Add(&model.Segment{model.Coord{}, model.XY(value, 1)})
+			result, err := Union2D(DefaultOptions2D(), input)
+			if result != nil || err == nil {
+				t.Fatalf("got result=%v err=%v", result, err)
+			}
+		})
+	}
+}
+
 func TestRandomRaggedPolygons(t *testing.T) {
 	rng := rand.New(rand.NewSource(1337))
 	for trial := 0; trial < 200; trial++ {
@@ -233,6 +287,56 @@ func TestRandomRaggedPolygons(t *testing.T) {
 			if math.IsNaN(result.Area()) || result.Area() < -1e-9 {
 				t.Fatalf("trial %d %s: invalid area %g", trial, name, result.Area())
 			}
+		}
+	}
+}
+
+func TestRandomScaledBooleans2D(t *testing.T) {
+	// Exercise float32-style vertices, very small and large model scales, and
+	// nearly coincident translations with a fixed, bounded campaign.
+	rng := rand.New(rand.NewSource(0x2da11d17))
+	for trial := 0; trial < 500; trial++ {
+		a := randomRadialMesh(rng, model.Coord{}, 8+rng.Intn(40))
+		b := randomRadialMesh(rng, model.Coord{}, 8+rng.Intn(40))
+		scale := math.Ldexp(1, rng.Intn(41)-20)
+		shift := model.NewCoordPolar(rng.Float64()*2*math.Pi,
+			scale*math.Pow(10, -float64(rng.Intn(13))))
+		float32Coords := trial%3 == 0
+		transform := func(mesh *model.Mesh, translation model.Coord) *model.Mesh {
+			return mesh.MapCoords(func(point model.Coord) model.Coord {
+				point = point.Scale(scale).Add(translation)
+				if float32Coords {
+					point = model.XY(float64(float32(point.X)), float64(float32(point.Y)))
+				}
+				return point
+			})
+		}
+		a, b = transform(a, model.Coord{}), transform(b, shift)
+		if !a.Manifold() || !b.Manifold() {
+			continue
+		}
+		u, err := Union2D(DefaultOptions2D(), a, b)
+		if err != nil {
+			t.Fatalf("trial %d union (scale=%g shift=%v float32=%v): %v",
+				trial, scale, shift, float32Coords, err)
+		}
+		i, err := Intersection2D(DefaultOptions2D(), a, b)
+		if err != nil {
+			t.Fatalf("trial %d intersection (scale=%g shift=%v float32=%v): %v",
+				trial, scale, shift, float32Coords, err)
+		}
+		d, err := Difference2D(DefaultOptions2D(), a, b)
+		if err != nil {
+			t.Fatalf("trial %d difference (scale=%g shift=%v float32=%v): %v",
+				trial, scale, shift, float32Coords, err)
+		}
+		for _, result := range []*model.Mesh{u, i, d} {
+			assertValidMesh(t, result)
+		}
+		tolerance := scale * scale * 1e-6
+		if math.Abs(u.Area()+i.Area()-a.Area()-b.Area()) > tolerance ||
+			math.Abs(d.Area()+i.Area()-a.Area()) > tolerance {
+			t.Fatalf("trial %d area identities failed", trial)
 		}
 	}
 }
@@ -399,4 +503,18 @@ func randomRadialMesh(rng *rand.Rand, center model.Coord, count int) *model.Mesh
 		mesh.Add(&model.Segment{points[(i+1)%len(points)], points[i]})
 	}
 	return mesh
+}
+
+func orientedRect2D(center model.Coord, length, width, angle float64) *model.Mesh {
+	along := model.NewCoordPolar(angle, length/2)
+	across := model.NewCoordPolar(angle+math.Pi/2, width/2)
+	points := []model.Coord{
+		center.Sub(along).Sub(across), center.Sub(along).Add(across),
+		center.Add(along).Add(across), center.Add(along).Sub(across),
+	}
+	result := model.NewMesh()
+	for i, point := range points {
+		result.Add(&model.Segment{point, points[(i+1)%len(points)]})
+	}
+	return result
 }
