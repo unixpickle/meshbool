@@ -20,10 +20,11 @@ type exactTriangleIntersector struct {
 }
 
 type exactMeshClassifier struct {
-	triangles  map[*model3d.Triangle]exactTriangle3D
-	index      *triangleIndex
-	min, max   model3d.Coord3D
-	directions []exactRayDirection
+	triangles        map[*model3d.Triangle]exactTriangle3D
+	index            *triangleIndex
+	min, max         model3d.Coord3D
+	directions       []exactRayDirection
+	candidateScratch []*model3d.Triangle
 }
 
 type exactRayDirection struct {
@@ -65,6 +66,13 @@ func (e *exactMeshClassifier) contains(point model3d.Coord3D) (bool, error) {
 		point.X > e.max.X || point.Y > e.max.Y || point.Z > e.max.Z {
 		return false, nil
 	}
+	if inside, conclusive := e.containsAxisFiltered(point); conclusive {
+		return inside, nil
+	}
+	return e.containsExact(point)
+}
+
+func (e *exactMeshClassifier) containsExact(point model3d.Coord3D) (bool, error) {
 	exactPoint, err := exactCoordFromFloat(point)
 	if err != nil {
 		return false, err
@@ -80,11 +88,11 @@ func (e *exactMeshClassifier) contains(point model3d.Coord3D) (bool, error) {
 		if direction.approximate.Z > 0 {
 			max.Z = e.max.Z
 		}
-		var candidates []*model3d.Triangle
-		e.index.query(min, max, &candidates)
+		e.candidateScratch = e.candidateScratch[:0]
+		e.index.query(min, max, &e.candidateScratch)
 		collisions := 0
 		degenerate := false
-		for _, candidate := range candidates {
+		for _, candidate := range e.candidateScratch {
 			triangle, err := e.triangle(candidate)
 			if err != nil {
 				return false, err
@@ -131,6 +139,65 @@ func (e *exactMeshClassifier) contains(point model3d.Coord3D) (bool, error) {
 		}
 	}
 	return false, fmt.Errorf("meshbool: could not classify a surface cell without a degenerate ray")
+}
+
+func (e *exactMeshClassifier) containsAxisFiltered(point model3d.Coord3D) (bool, bool) {
+	query := boundedExactCoordFromFinite(point)
+	for axis := 0; axis < 3; axis++ {
+		min, max := point, point
+		switch axis {
+		case 0:
+			max.X = e.max.X
+		case 1:
+			max.Y = e.max.Y
+		default:
+			max.Z = e.max.Z
+		}
+		e.candidateScratch = e.candidateScratch[:0]
+		e.index.query(min, max, &e.candidateScratch)
+		collisions := 0
+		degenerate := false
+		for _, candidate := range e.candidateScratch {
+			triangle := boundedExactTriangleFromFinite(candidate)
+			orientation, ok := intervalOrient2DSign(triangle[0], triangle[1], triangle[2], axis)
+			if !ok {
+				degenerate = true
+				break
+			}
+			side, ok := intervalOrient3DSign(triangle[0], triangle[1], triangle[2], query)
+			if !ok {
+				degenerate = true
+				break
+			}
+			// The ray-plane parameter is -side/orientation, so equal signs
+			// place the intersection behind the ray origin.
+			if side == orientation {
+				continue
+			}
+			inside := true
+			for i, start := range triangle {
+				edgeSide, ok := intervalOrient2DSign(start, triangle[(i+1)%3], query, axis)
+				if !ok {
+					degenerate = true
+					break
+				}
+				if edgeSide != orientation {
+					inside = false
+					break
+				}
+			}
+			if degenerate {
+				break
+			}
+			if inside {
+				collisions++
+			}
+		}
+		if !degenerate {
+			return collisions%2 == 1, true
+		}
+	}
+	return false, false
 }
 
 func (e *exactMeshClassifier) triangle(t *model3d.Triangle) (exactTriangle3D, error) {
@@ -259,6 +326,22 @@ func exactCoordFromFinite(point model3d.Coord3D) exactCoord3D {
 	}
 }
 
+func boundedExactCoordFromFinite(point model3d.Coord3D) exactCoord3D {
+	return exactCoord3D{bounds: [3]floatInterval{
+		{min: point.X, max: point.X},
+		{min: point.Y, max: point.Y},
+		{min: point.Z, max: point.Z},
+	}}
+}
+
+func boundedExactTriangleFromFinite(triangle *model3d.Triangle) exactTriangle3D {
+	return exactTriangle3D{
+		boundedExactCoordFromFinite(triangle[0]),
+		boundedExactCoordFromFinite(triangle[1]),
+		boundedExactCoordFromFinite(triangle[2]),
+	}
+}
+
 func exactTrianglesCoplanar(a, b exactTriangle3D) bool {
 	for _, point := range a {
 		if filteredOrient3DSign(b[0], b[1], b[2], point) != 0 {
@@ -374,6 +457,13 @@ func exactOrient3D(a, b, c, point exactCoord3D) *big.Rat {
 // float64 intervals. A non-zero interval sign is therefore conclusive; only
 // determinants whose interval contains zero pay for exact rational arithmetic.
 func filteredOrient3DSign(a, b, c, point exactCoord3D) int {
+	if sign, ok := intervalOrient3DSign(a, b, c, point); ok {
+		return sign
+	}
+	return exactOrient3D(a, b, c, point).Sign()
+}
+
+func intervalOrient3DSign(a, b, c, point exactCoord3D) (int, bool) {
 	ab := intervalCoordSubtract(b, a)
 	ac := intervalCoordSubtract(c, a)
 	ap := intervalCoordSubtract(point, a)
@@ -385,9 +475,9 @@ func filteredOrient3DSign(a, b, c, point exactCoord3D) int {
 		intervalMultiply(crossZ, ap[2]),
 	)
 	if sign := intervalSign(determinant); sign != 0 {
-		return sign
+		return sign, true
 	}
-	return exactOrient3D(a, b, c, point).Sign()
+	return 0, false
 }
 
 func exactNormalDot(triangle exactTriangle3D, direction exactCoord3D) *big.Rat {
@@ -517,6 +607,13 @@ func exactOrient2D(a, b, point exactCoord3D, drop int) *big.Rat {
 }
 
 func filteredOrient2DSign(a, b, point exactCoord3D, drop int) int {
+	if sign, ok := intervalOrient2DSign(a, b, point, drop); ok {
+		return sign
+	}
+	return exactOrient2D(a, b, point, drop).Sign()
+}
+
+func intervalOrient2DSign(a, b, point exactCoord3D, drop int) (int, bool) {
 	axis1, axis2 := (drop+1)%3, (drop+2)%3
 	ab1 := intervalSubtract(b.bounds[axis1], a.bounds[axis1])
 	ab2 := intervalSubtract(b.bounds[axis2], a.bounds[axis2])
@@ -524,9 +621,9 @@ func filteredOrient2DSign(a, b, point exactCoord3D, drop int) int {
 	ap2 := intervalSubtract(point.bounds[axis2], a.bounds[axis2])
 	determinant := intervalSubtract(intervalMultiply(ab1, ap2), intervalMultiply(ab2, ap1))
 	if sign := intervalSign(determinant); sign != 0 {
-		return sign
+		return sign, true
 	}
-	return exactOrient2D(a, b, point, drop).Sign()
+	return 0, false
 }
 
 func intervalCoordSubtract(a, b exactCoord3D) [3]floatInterval {

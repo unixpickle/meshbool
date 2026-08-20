@@ -834,3 +834,51 @@ func TestExactSelfIntersections(t *testing.T) {
 		})
 	}
 }
+
+func TestTriangleIndexQueries(t *testing.T) {
+	rng := rand.New(rand.NewSource(0x1de7ca5e))
+	triangles := make([]*model3d.Triangle, 200)
+	for i := range triangles {
+		triangle := model3d.Triangle{
+			model3d.NewCoord3DRandNorm(rng),
+			model3d.NewCoord3DRandNorm(rng),
+			model3d.NewCoord3DRandNorm(rng),
+		}
+		triangles[i] = &triangle
+	}
+	index := newTriangleIndex(triangles)
+	for trial := 0; trial < 200; trial++ {
+		center := model3d.NewCoord3DRandNorm(rng)
+		radius := model3d.Ones(rng.Float64() * 0.5)
+		min, max := center.Sub(radius), center.Add(radius)
+		want := map[*model3d.Triangle]int{}
+		for triangleIndex, triangle := range triangles {
+			triMin, triMax := triangle.Min(), triangle.Max()
+			if triMin.X <= max.X && triMax.X >= min.X &&
+				triMin.Y <= max.Y && triMax.Y >= min.Y &&
+				triMin.Z <= max.Z && triMax.Z >= min.Z {
+				want[triangle] = triangleIndex
+			}
+		}
+		var pointers []*model3d.Triangle
+		index.query(min, max, &pointers)
+		if len(pointers) != len(want) {
+			t.Fatalf("trial %d: pointer query returned %d triangles; want %d", trial, len(pointers), len(want))
+		}
+		for _, triangle := range pointers {
+			if _, ok := want[triangle]; !ok {
+				t.Fatalf("trial %d: pointer query returned unexpected triangle", trial)
+			}
+		}
+		var indexed []indexedTriangleCandidate3D
+		index.queryIndexed(min, max, &indexed)
+		if len(indexed) != len(want) {
+			t.Fatalf("trial %d: indexed query returned %d triangles; want %d", trial, len(indexed), len(want))
+		}
+		for _, candidate := range indexed {
+			if expected, ok := want[candidate.triangle]; !ok || candidate.index != expected {
+				t.Fatalf("trial %d: indexed query returned index %d, want %d", trial, candidate.index, expected)
+			}
+		}
+	}
+}

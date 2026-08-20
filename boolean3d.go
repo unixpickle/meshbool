@@ -314,8 +314,9 @@ func buildTriangleRelations(options Options3D, trianglesA []*model3d.Triangle,
 	resultA := map[*model3d.Triangle]*triangleRelation{}
 	resultB := map[*model3d.Triangle]*triangleRelation{}
 	intersector := newExactTriangleIntersector()
+	var nearby []*model3d.Triangle
 	for _, triangleA := range trianglesA {
-		var nearby []*model3d.Triangle
+		nearby = nearby[:0]
 		indexB.query(triangleA.Min(), triangleA.Max(), &nearby)
 		sort.Slice(nearby, func(i, j int) bool {
 			keyI, _ := makeTriangleKey(*nearby[i])
@@ -1033,20 +1034,25 @@ func selectSourceSurface(kind meshBooleanKind, sourceA, insideOther bool) (bool,
 	}
 }
 
+type keyedTriangle3D struct {
+	triangle *model3d.Triangle
+	key      triangleKey
+}
+
+type keyedTriangleSorter3D []keyedTriangle3D
+
+func (k keyedTriangleSorter3D) Len() int           { return len(k) }
+func (k keyedTriangleSorter3D) Less(i, j int) bool { return triangleKeyLess(k[i].key, k[j].key) }
+func (k keyedTriangleSorter3D) Swap(i, j int)      { k[i], k[j] = k[j], k[i] }
+
 func sortedTriangles(mesh *model3d.Mesh) []*model3d.Triangle {
 	triangles := mesh.TriangleSlice()
-	type keyedTriangle struct {
-		triangle *model3d.Triangle
-		key      triangleKey
-	}
-	keyed := make([]keyedTriangle, len(triangles))
+	keyed := make([]keyedTriangle3D, len(triangles))
 	for i, triangle := range triangles {
 		keyed[i].triangle = triangle
 		keyed[i].key, _ = makeTriangleKey(*triangle)
 	}
-	sort.Slice(keyed, func(i, j int) bool {
-		return triangleKeyLess(keyed[i].key, keyed[j].key)
-	})
+	sort.Sort(keyedTriangleSorter3D(keyed))
 	for i := range keyed {
 		triangles[i] = keyed[i].triangle
 	}
@@ -1406,8 +1412,9 @@ func finalizeTriangles(options Options3D, raw []model3d.Triangle, tol float64) (
 	}
 	index := newPointIndex(canon.points)
 	conformed := make([]model3d.Triangle, 0, len(raw))
+	var pointCandidates []model3d.Coord3D
 	for _, tri := range raw {
-		conformed = append(conformed, conformTriangle(tri, index, tol)...)
+		conformed = appendConformedTriangle(conformed, tri, index, tol, &pointCandidates)
 		if err := checkComplexity("conforming output triangles", len(conformed), options.MaxOutputTriangles); err != nil {
 			return nil, err
 		}
@@ -1429,7 +1436,7 @@ func finalizeTriangles(options Options3D, raw []model3d.Triangle, tol float64) (
 		}
 		balances[key] = balance
 	}
-	var candidates []model3d.Triangle
+	result := model3d.NewMesh()
 	for _, balance := range balances {
 		if balance.value == 0 {
 			continue
@@ -1438,10 +1445,6 @@ func finalizeTriangles(options Options3D, raw []model3d.Triangle, tol float64) (
 		if balance.value < 0 {
 			tri = balance.negative
 		}
-		candidates = append(candidates, tri)
-	}
-	result := model3d.NewMesh()
-	for _, tri := range candidates {
 		triCopy := tri
 		result.Add(&triCopy)
 	}
@@ -1490,33 +1493,27 @@ func validateResultTopology(mesh *model3d.Mesh) (*model3d.Mesh, error) {
 }
 
 func exactSelfIntersections(mesh *model3d.Mesh) (int, error) {
-	// The model3d collider is an efficient broad phase but can report tiny,
-	// direction-dependent intersections at numerical near-contacts. If it sees
-	// nothing, retain its existing behavior. Otherwise, confirm every reported
-	// pair with exact predicates before rejecting the mesh.
-	if mesh.SelfIntersections() == 0 {
-		return 0, nil
-	}
+	// Use the same cached-bounds index as corefinement. Building model3d's
+	// collider here duplicates a large BVH at the operation's peak memory use,
+	// which is especially costly under WebAssembly. Approximate collisions are
+	// still checked in both directions, then confirmed with exact predicates.
 	triangles := sortedTriangles(mesh)
-	indices := make(map[*model3d.Triangle]int, len(triangles))
-	for index, triangle := range triangles {
-		indices[triangle] = index
-	}
 	spatialIndex := newTriangleIndex(triangles)
 	intersector := newExactTriangleIntersector()
 	count := 0
+	var candidates []indexedTriangleCandidate3D
 	for index, triangle := range triangles {
-		var candidates []*model3d.Triangle
-		spatialIndex.query(triangle.Min(), triangle.Max(), &candidates)
+		candidates = candidates[:0]
+		spatialIndex.queryIndexed(triangle.Min(), triangle.Max(), &candidates)
 		for _, candidate := range candidates {
-			if indices[candidate] <= index || trianglesShareEdge(triangle, candidate) {
+			if candidate.index <= index || trianglesShareEdge(triangle, candidate.triangle) {
 				continue
 			}
-			if len(triangle.TriangleCollisions(candidate)) == 0 &&
-				len(candidate.TriangleCollisions(triangle)) == 0 {
+			if len(triangle.TriangleCollisions(candidate.triangle)) == 0 &&
+				len(candidate.triangle.TriangleCollisions(triangle)) == 0 {
 				continue
 			}
-			intersection, err := intersector.intersection(triangle, candidate)
+			intersection, err := intersector.intersection(triangle, candidate.triangle)
 			if err != nil {
 				return 0, err
 			}
@@ -1712,19 +1709,32 @@ func separateContactComponents(mesh *model3d.Mesh, tol float64) *model3d.Mesh {
 	if len(triangles) == 0 {
 		return mesh
 	}
-	edgeTriangles := map[model3d.Segment][]int{}
+	type incidentTriangles struct {
+		first, second int
+		count         int
+	}
+	edgeTriangles := map[model3d.Segment]incidentTriangles{}
 	for i, tri := range triangles {
 		for j := range tri {
 			edge := model3d.NewSegment(tri[j], tri[(j+1)%3])
-			edgeTriangles[edge] = append(edgeTriangles[edge], i)
+			incident := edgeTriangles[edge]
+			if incident.count == 0 {
+				incident.first = i
+			} else if incident.count == 1 {
+				incident.second = i
+			}
+			incident.count++
+			edgeTriangles[edge] = incident
 		}
 	}
-	adjacent := make([][]int, len(triangles))
-	for _, indices := range edgeTriangles {
-		if len(indices) == 2 {
-			a, b := indices[0], indices[1]
-			adjacent[a] = append(adjacent[a], b)
-			adjacent[b] = append(adjacent[b], a)
+	adjacent := make([][3]int, len(triangles))
+	adjacentCounts := make([]uint8, len(triangles))
+	for _, incident := range edgeTriangles {
+		if incident.count == 2 {
+			adjacent[incident.first][adjacentCounts[incident.first]] = incident.second
+			adjacentCounts[incident.first]++
+			adjacent[incident.second][adjacentCounts[incident.second]] = incident.first
+			adjacentCounts[incident.second]++
 		}
 	}
 	components := make([]int, len(triangles))
@@ -1749,7 +1759,7 @@ func separateContactComponents(mesh *model3d.Mesh, tol float64) *model3d.Mesh {
 				centers[component] = centers[component].Add(point)
 				centerCounts[component]++
 			}
-			for _, neighbor := range adjacent[index] {
+			for _, neighbor := range adjacent[index][:adjacentCounts[index]] {
 				if components[neighbor] < 0 {
 					components[neighbor] = component
 					queue = append(queue, neighbor)
@@ -2024,22 +2034,57 @@ type pointIndex struct {
 
 type triangleIndex struct {
 	min, max    model3d.Coord3D
-	triangles   []*model3d.Triangle
+	triangles   []boundedTriangle3D
 	left, right *triangleIndex
+}
+
+type boundedTriangle3D struct {
+	triangle *model3d.Triangle
+	min, max model3d.Coord3D
+	index    int
+}
+
+type boundedTriangleSorter3D struct {
+	triangles []boundedTriangle3D
+	axis      int
+}
+
+func (b boundedTriangleSorter3D) Len() int { return len(b.triangles) }
+func (b boundedTriangleSorter3D) Less(i, j int) bool {
+	centerI := coordAxis(b.triangles[i].min, b.axis) + coordAxis(b.triangles[i].max, b.axis)
+	centerJ := coordAxis(b.triangles[j].min, b.axis) + coordAxis(b.triangles[j].max, b.axis)
+	return centerI < centerJ
+}
+func (b boundedTriangleSorter3D) Swap(i, j int) {
+	b.triangles[i], b.triangles[j] = b.triangles[j], b.triangles[i]
+}
+
+type indexedTriangleCandidate3D struct {
+	triangle *model3d.Triangle
+	index    int
 }
 
 func newTriangleIndex(triangles []*model3d.Triangle) *triangleIndex {
 	if len(triangles) == 0 {
 		return nil
 	}
-	return buildTriangleIndex(append([]*model3d.Triangle(nil), triangles...))
+	bounded := make([]boundedTriangle3D, len(triangles))
+	for i, triangle := range triangles {
+		bounded[i] = boundedTriangle3D{
+			triangle: triangle,
+			min:      triangle.Min(),
+			max:      triangle.Max(),
+			index:    i,
+		}
+	}
+	return buildTriangleIndex(bounded)
 }
 
-func buildTriangleIndex(triangles []*model3d.Triangle) *triangleIndex {
-	node := &triangleIndex{min: triangles[0].Min(), max: triangles[0].Max()}
+func buildTriangleIndex(triangles []boundedTriangle3D) *triangleIndex {
+	node := &triangleIndex{min: triangles[0].min, max: triangles[0].max}
 	for _, triangle := range triangles[1:] {
-		node.min = node.min.Min(triangle.Min())
-		node.max = node.max.Max(triangle.Max())
+		node.min = node.min.Min(triangle.min)
+		node.max = node.max.Max(triangle.max)
 	}
 	if len(triangles) <= 8 {
 		node.triangles = triangles
@@ -2053,11 +2098,7 @@ func buildTriangleIndex(triangles []*model3d.Triangle) *triangleIndex {
 	if coordAxis(span, 2) > coordAxis(span, axis) {
 		axis = 2
 	}
-	sort.Slice(triangles, func(i, j int) bool {
-		centerI := triangles[i].Min().Mid(triangles[i].Max())
-		centerJ := triangles[j].Min().Mid(triangles[j].Max())
-		return coordAxis(centerI, axis) < coordAxis(centerJ, axis)
-	})
+	sort.Sort(boundedTriangleSorter3D{triangles: triangles, axis: axis})
 	mid := len(triangles) / 2
 	node.left = buildTriangleIndex(triangles[:mid])
 	node.right = buildTriangleIndex(triangles[mid:])
@@ -2071,16 +2112,40 @@ func (t *triangleIndex) query(min, max model3d.Coord3D, result *[]*model3d.Trian
 	}
 	if t.left == nil {
 		for _, triangle := range t.triangles {
-			triMin, triMax := triangle.Min(), triangle.Max()
-			if triMin.X <= max.X && triMax.X >= min.X && triMin.Y <= max.Y && triMax.Y >= min.Y &&
-				triMin.Z <= max.Z && triMax.Z >= min.Z {
-				*result = append(*result, triangle)
+			if triangle.min.X <= max.X && triangle.max.X >= min.X &&
+				triangle.min.Y <= max.Y && triangle.max.Y >= min.Y &&
+				triangle.min.Z <= max.Z && triangle.max.Z >= min.Z {
+				*result = append(*result, triangle.triangle)
 			}
 		}
 		return
 	}
 	t.left.query(min, max, result)
 	t.right.query(min, max, result)
+}
+
+func (t *triangleIndex) queryIndexed(min, max model3d.Coord3D,
+	result *[]indexedTriangleCandidate3D,
+) {
+	if t == nil || t.min.X > max.X || t.max.X < min.X ||
+		t.min.Y > max.Y || t.max.Y < min.Y || t.min.Z > max.Z || t.max.Z < min.Z {
+		return
+	}
+	if t.left == nil {
+		for _, triangle := range t.triangles {
+			if triangle.min.X <= max.X && triangle.max.X >= min.X &&
+				triangle.min.Y <= max.Y && triangle.max.Y >= min.Y &&
+				triangle.min.Z <= max.Z && triangle.max.Z >= min.Z {
+				*result = append(*result, indexedTriangleCandidate3D{
+					triangle: triangle.triangle,
+					index:    triangle.index,
+				})
+			}
+		}
+		return
+	}
+	t.left.queryIndexed(min, max, result)
+	t.right.queryIndexed(min, max, result)
 }
 
 func newPointIndex(points []model3d.Coord3D) *pointIndex {
@@ -2133,20 +2198,25 @@ func (p *pointIndex) query(min, max model3d.Coord3D, result *[]model3d.Coord3D) 
 	p.right.query(min, max, result)
 }
 
-func conformTriangle(t model3d.Triangle, index *pointIndex, tol float64) []model3d.Triangle {
+func appendConformedTriangle(result []model3d.Triangle, t model3d.Triangle,
+	index *pointIndex, tol float64, candidates *[]model3d.Coord3D,
+) []model3d.Triangle {
 	min := t.Min().AddScalar(-tol)
 	max := t.Max().AddScalar(tol)
-	var candidates []model3d.Coord3D
-	index.query(min, max, &candidates)
+	*candidates = (*candidates)[:0]
+	index.query(min, max, candidates)
 	normal := t.Normal()
-	filtered := candidates[:0]
-	for _, point := range candidates {
+	filtered := (*candidates)[:0]
+	for _, point := range *candidates {
 		if point == t[0] || point == t[1] || point == t[2] {
 			continue
 		}
 		if math.Abs(normal.Dot(point.Sub(t[0]))) <= tol && pointInTriangle3D(t, point, tol) {
 			filtered = append(filtered, point)
 		}
+	}
+	if len(filtered) == 0 {
+		return append(result, t)
 	}
 	sort.Slice(filtered, func(i, j int) bool { return coord3Less(filtered[i], filtered[j]) })
 	triangles := []model3d.Triangle{t}
@@ -2189,7 +2259,7 @@ func conformTriangle(t model3d.Triangle, index *pointIndex, tol float64) []model
 			}
 		}
 	}
-	return triangles
+	return append(result, triangles...)
 }
 
 func appendNondegenerate(triangles []model3d.Triangle, triangle model3d.Triangle, tol float64) []model3d.Triangle {

@@ -57,3 +57,33 @@ func TestFilteredPredicatesMatchExact(t *testing.T) {
 		}
 	}
 }
+
+func TestFilteredAxisClassifierMatchesExact(t *testing.T) {
+	mesh := model3d.NewMeshIcosphere(model3d.Coord3D{}, 1, 1)
+	triangles := sortedTriangles(mesh)
+	classifier := newExactMeshClassifier(triangles, newTriangleIndex(triangles))
+	rng := rand.New(rand.NewSource(0xa815f17e2))
+	conclusive := 0
+	for trial := 0; trial < 1000; trial++ {
+		point := model3d.XYZ(
+			rng.Float64()*1.8-0.9,
+			rng.Float64()*1.8-0.9,
+			rng.Float64()*1.8-0.9,
+		)
+		filtered, ok := classifier.containsAxisFiltered(point)
+		if !ok {
+			continue
+		}
+		conclusive++
+		exact, err := classifier.containsExact(point)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if filtered != exact {
+			t.Fatalf("trial %d at %v: filtered=%v exact=%v", trial, point, filtered, exact)
+		}
+	}
+	if conclusive < 950 {
+		t.Fatalf("only %d of 1000 ordinary points used the filtered path", conclusive)
+	}
+}
