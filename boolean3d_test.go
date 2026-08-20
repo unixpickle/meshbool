@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/unixpickle/meshbool/internal/bool2d"
+	"github.com/unixpickle/model3d/model2d"
 	"github.com/unixpickle/model3d/model3d"
 )
 
@@ -123,6 +124,44 @@ func TestMarchingCubesCubeSphereDifference(t *testing.T) {
 				t.Fatal("difference unexpectedly produced an empty solid")
 			}
 		})
+	}
+}
+
+func TestConstrainedTriangleFacesCloseIntersections(t *testing.T) {
+	// These are projected intersections from float32 GPU-generated cube and
+	// sphere meshes. Several nodes are extremely close, but remain distinct at
+	// the operation's scale and must not be inconsistently snapped to edges.
+	const tol = 1.999999940395355e-12
+	triangle := []model2d.Coord{
+		model2d.XY(0, 0),
+		model2d.XY(0.000966747566809144, -0.09863760976660547),
+		model2d.XY(0.001933495133618288, -3.3037070619033328e-22),
+	}
+	cutStart := model2d.XY(0.000966747566809144, -0.09863760394161743)
+	cutEndA := model2d.XY(0.0009667476238983269, -0.0986376039417752)
+	cutEndB := model2d.XY(0.000966747509719961, -0.09863760394177519)
+	faces, err := constrainedTriangleFaces(triangle, [][2]model2d.Coord{
+		{cutStart, cutEndA}, {cutStart, cutEndB},
+	}, tol)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, constraint := range [][2]model2d.Coord{
+		{cutStart, cutEndA}, {cutStart, cutEndB},
+	} {
+		found := false
+		for _, face := range faces {
+			for i, point := range face {
+				next := face[(i+1)%len(face)]
+				if (point == constraint[0] && next == constraint[1]) ||
+					(point == constraint[1] && next == constraint[0]) {
+					found = true
+				}
+			}
+		}
+		if !found {
+			t.Fatalf("constraint %v was not present in triangulation", constraint)
+		}
 	}
 }
 

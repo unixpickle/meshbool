@@ -386,10 +386,9 @@ func splitAndClassifyMesh(options Options3D, triangles []*model3d.Triangle,
 				nodes = append(nodes, projectedNode{projected: project(point), original: point})
 			}
 		}
-		nodeSnapTol := tol * 128
 		lift := func(point model2d.Coord) model3d.Coord3D {
 			for _, node := range nodes {
-				if point.Dist(node.projected) <= nodeSnapTol {
+				if point.Dist(node.projected) <= tol {
 					return node.original
 				}
 			}
@@ -592,7 +591,7 @@ func constrainedTriangleFaces(triangle []model2d.Coord, cuts [][2]model2d.Coord,
 			}
 			parameter := point.Sub(start).Dot(delta) / lengthSquared
 			if parameter > 0 && parameter < 1 &&
-				start.Add(delta.Scale(parameter)).Dist(point) <= tol*128 {
+				start.Add(delta.Scale(parameter)).Dist(point) <= tol {
 				onSegment = append(onSegment, parameterizedPoint{index, parameter})
 			}
 		}
@@ -637,7 +636,7 @@ func constrainedTriangleFaces(triangle []model2d.Coord, cuts [][2]model2d.Coord,
 				continue
 			}
 			distance := start.Add(delta.Scale(parameter)).Dist(point)
-			if distance <= tol*128 && distance < bestDistance {
+			if distance <= tol && distance < bestDistance {
 				splitEdge, bestDistance = edge, distance
 			}
 		}
