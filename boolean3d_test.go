@@ -144,29 +144,7 @@ func TestMarchingCubesShiftedCubeSphereUnion(t *testing.T) {
 }
 
 func TestDifferenceNearCoplanarTangentExtrusion(t *testing.T) {
-	// This is a 12-triangle decimation of a delta=0.1 dual-contoured unit
-	// cube. Its faces are almost planar, but contain errors on the order of
-	// 1e-7. In particular, its bottom straddles the extrusion's Z=0 cap.
-	vertices := []model3d.Coord3D{
-		{X: 1.7989322182086236e-08, Y: 1.0000000272911684, Z: 1.6634052322922494e-07},
-		{X: -1.585137612667889e-07, Y: -3.0676921251141815e-07, Z: 1.0000000008863323},
-		{X: -1.543049614467355e-07, Y: 1.0000000914954403, Z: 1.0000001813827935},
-		{X: 0.999999850487341, Y: 0.9999997717239826, Z: 1.0000002782672948},
-		{X: 1.8241566398922915e-09, Y: 2.8559714585912116e-09, Z: -3.5339673175418814e-09},
-		{X: 0.999999845425978, Y: -1.870602983595055e-07, Z: 1.0000000980696397},
-		{X: 1.0000000135362375, Y: 0.9999997193224248, Z: 2.7184174006594976e-07},
-		{X: 1.0000000057638958, Y: 1.2256488561321437e-07, Z: 9.364934009533608e-08},
-	}
-	indices := [][3]int{
-		{0, 1, 2}, {1, 3, 2}, {1, 0, 4}, {5, 1, 4},
-		{3, 1, 5}, {3, 0, 2}, {6, 4, 0}, {4, 7, 5},
-		{4, 6, 7}, {0, 3, 6}, {5, 6, 3}, {6, 5, 7},
-	}
-	cube := model3d.NewMesh()
-	for _, index := range indices {
-		triangle := model3d.Triangle{vertices[index[0]], vertices[index[1]], vertices[index[2]]}
-		cube.Add(&triangle)
-	}
+	cube := nearCoplanarCubeRegressionMesh()
 	circle := model2d.MarchingSquaresSearch(&model2d.Circle{Radius: 0.2}, 0.01, 8)
 	extrusion := model3d.ProfileMesh(circle, 0, 10)
 	options := DefaultOptions3D()
@@ -176,6 +154,84 @@ func TestDifferenceNearCoplanarTangentExtrusion(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertValidMesh3D(t, result)
+}
+
+func TestDifferenceNearCoplanarExtrusionAndSphere(t *testing.T) {
+	cube := nearCoplanarQEFDecimatedCubeRegressionMesh()
+	if intersections, err := exactSelfIntersections(cube); err != nil || intersections != 0 {
+		t.Fatalf("input cube intersections=%d err=%v", intersections, err)
+	}
+	circle := model2d.MarchingSquaresSearch(&model2d.Circle{Radius: 0.2}, 0.01, 8)
+	extrusion := model3d.ProfileMesh(circle, 0, 10)
+	sphere := model3d.DualContour(&model3d.Sphere{Radius: 0.5}, 0.03, true, false)
+	options := DefaultOptions3D()
+	options.MaxFragmentsPerTriangle = 200_000
+	first, err := Difference3D(options, cube, extrusion)
+	if err != nil {
+		t.Fatalf("first subtraction: %v", err)
+	}
+	result, err := Difference3D(options, first, sphere)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertValidMesh3D(t, result)
+}
+
+func nearCoplanarQEFDecimatedCubeRegressionMesh() *model3d.Mesh {
+	// Captured directly from QEFDecimate(..., 12, nil). Two representatives
+	// moved well along cube edges, creating very shallow but valid triangles.
+	vertices := []model3d.Coord3D{
+		{X: -8.434097193851084e-08, Y: -1.2848761257615438e-07, Z: 0.9999999482228997},
+		{X: -1.543049505568023e-07, Y: 1.0000001038407256, Z: 1.0000001762766193},
+		{X: -6.931335464729355e-10, Y: 1.0000000011770245, Z: 0.8519735532751869},
+		{X: 0.9999998780299374, Y: 1.0000000093652985, Z: 1.0000001227771633},
+		{X: 0.030303027763224022, Y: -1.0849521524848526e-08, Z: -7.576117665885251e-08},
+		{X: 0.9999999857127566, Y: -3.279744083358601e-09, Z: 1.0000000495525365},
+		{X: 1.449797825272197e-08, Y: 1.0000000038019847, Z: 1.719238328279475e-07},
+		{X: 1.0000000019282878, Y: 0.9999999589361392, Z: 1.3979570033329525e-07},
+	}
+	indices := [][3]int{
+		{0, 1, 2}, {1, 0, 3}, {2, 1, 3}, {4, 0, 2},
+		{4, 5, 0}, {0, 5, 3}, {4, 2, 6}, {7, 6, 2},
+		{3, 7, 2}, {4, 6, 7}, {5, 4, 7}, {5, 7, 3},
+	}
+	result := model3d.NewMesh()
+	for _, index := range indices {
+		triangle := model3d.Triangle{vertices[index[0]], vertices[index[1]], vertices[index[2]]}
+		result.Add(&triangle)
+	}
+	return result
+}
+
+func nearCoplanarCubeRegressionMesh() *model3d.Mesh {
+	// This is a 12-triangle decimation of a delta=0.1 dual-contoured unit
+	// cube. Its faces are almost planar, but contain errors on the order of
+	// 1e-7. In particular, its bottom straddles the extrusion's Z=0 cap.
+	vertices := nearCoplanarCubeRegressionVertices()
+	indices := [][3]int{
+		{0, 1, 2}, {1, 3, 2}, {1, 0, 4}, {5, 1, 4},
+		{3, 1, 5}, {3, 0, 2}, {6, 4, 0}, {4, 7, 5},
+		{4, 6, 7}, {0, 3, 6}, {5, 6, 3}, {6, 5, 7},
+	}
+	result := model3d.NewMesh()
+	for _, index := range indices {
+		triangle := model3d.Triangle{vertices[index[0]], vertices[index[1]], vertices[index[2]]}
+		result.Add(&triangle)
+	}
+	return result
+}
+
+func nearCoplanarCubeRegressionVertices() []model3d.Coord3D {
+	return []model3d.Coord3D{
+		{X: 1.7989322182086236e-08, Y: 1.0000000272911684, Z: 1.6634052322922494e-07},
+		{X: -1.585137612667889e-07, Y: -3.0676921251141815e-07, Z: 1.0000000008863323},
+		{X: -1.543049614467355e-07, Y: 1.0000000914954403, Z: 1.0000001813827935},
+		{X: 0.999999850487341, Y: 0.9999997717239826, Z: 1.0000002782672948},
+		{X: 1.8241566398922915e-09, Y: 2.8559714585912116e-09, Z: -3.5339673175418814e-09},
+		{X: 0.999999845425978, Y: -1.870602983595055e-07, Z: 1.0000000980696397},
+		{X: 1.0000000135362375, Y: 0.9999997193224248, Z: 2.7184174006594976e-07},
+		{X: 1.0000000057638958, Y: 1.2256488561321437e-07, Z: 9.364934009533608e-08},
+	}
 }
 
 func TestConstrainedTriangleFacesCloseIntersections(t *testing.T) {

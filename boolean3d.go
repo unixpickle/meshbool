@@ -270,12 +270,18 @@ func booleanMeshPairLocal(options Options3D, a, b *model3d.Mesh, kind meshBoolea
 	// The normal tolerance absorbs projection roundoff and is the stable choice
 	// for ordinary meshes. In a near-tangent arrangement it can instead erase a
 	// real microscopic surface cell. Retry topology failures with a tolerance
-	// close to machine precision so that cell remains explicit.
+	// close to machine precision so that cell remains explicit, and use a
+	// dominant-axis containment predicate that stays stable on skinny cells.
 	var lastErr error
-	for _, relativeTolerance := range []float64{
-		arithmeticToleranceRelative, fallbackToleranceRelative,
+	for _, attempt := range []struct {
+		relativeTolerance float64
+		robustConformance bool
+	}{
+		{arithmeticToleranceRelative, false},
+		{fallbackToleranceRelative, true},
 	} {
-		result, err := booleanMeshPairLocalTolerance(options, a, b, kind, relativeTolerance)
+		result, err := booleanMeshPairLocalTolerance(options, a, b, kind,
+			attempt.relativeTolerance, attempt.robustConformance)
 		if err == nil {
 			return result, nil
 		}
@@ -289,7 +295,7 @@ func booleanMeshPairLocal(options Options3D, a, b *model3d.Mesh, kind meshBoolea
 }
 
 func booleanMeshPairLocalTolerance(options Options3D, a, b *model3d.Mesh,
-	kind meshBooleanKind, relativeTolerance float64) (*model3d.Mesh, error) {
+	kind meshBooleanKind, relativeTolerance float64, robustConformance bool) (*model3d.Mesh, error) {
 	if err := checkComplexity("triangles in one input mesh", a.NumTriangles(), options.MaxInputTriangles); err != nil {
 		return nil, err
 	}
@@ -326,7 +332,7 @@ func booleanMeshPairLocalTolerance(options Options3D, a, b *model3d.Mesh,
 	if err := checkComplexity("surface fragments", len(fragments), options.MaxTotalFragments); err != nil {
 		return nil, err
 	}
-	return polygonsMesh(options, fragments, tol)
+	return polygonsMesh(options, fragments, tol, robustConformance)
 }
 
 type triangleRelation struct {
@@ -1283,7 +1289,8 @@ type coplanarGroup struct {
 
 type planeGroupKey [4]int64
 
-func polygonsMesh(options Options3D, polygons []*polygon, tol float64) (*model3d.Mesh, error) {
+func polygonsMesh(options Options3D, polygons []*polygon, tol float64,
+	robustConformance bool) (*model3d.Mesh, error) {
 	var raw []model3d.Triangle
 	var coplanar []*polygon
 	for _, polygon := range polygons {
@@ -1311,7 +1318,7 @@ func polygonsMesh(options Options3D, polygons []*polygon, tol float64) (*model3d
 		}
 		raw = append(raw, triangles...)
 	}
-	return finalizeTriangles(options, raw, tol)
+	return finalizeTriangles(options, raw, tol, robustConformance)
 }
 
 func triangulateCoplanarPolygons(options Options3D, polygons []*polygon,
@@ -1469,7 +1476,8 @@ func triangulatePlanarMesh(mesh *model2d.Mesh) ([][3]model2d.Coord, error) {
 	return model2d.TriangulateMesh(mesh), nil
 }
 
-func finalizeTriangles(options Options3D, raw []model3d.Triangle, tol float64) (*model3d.Mesh, error) {
+func finalizeTriangles(options Options3D, raw []model3d.Triangle, tol float64,
+	robustConformance bool) (*model3d.Mesh, error) {
 	if err := checkComplexity("output triangles", len(raw), options.MaxOutputTriangles); err != nil {
 		return nil, err
 	}
@@ -1483,7 +1491,8 @@ func finalizeTriangles(options Options3D, raw []model3d.Triangle, tol float64) (
 	conformed := make([]model3d.Triangle, 0, len(raw))
 	var pointCandidates []model3d.Coord3D
 	for _, tri := range raw {
-		conformed = appendConformedTriangle(conformed, tri, index, tol, &pointCandidates)
+		conformed = appendConformedTriangle(conformed, tri, index, tol,
+			robustConformance, &pointCandidates)
 		if err := checkComplexity("conforming output triangles", len(conformed), options.MaxOutputTriangles); err != nil {
 			return nil, err
 		}
@@ -2268,19 +2277,23 @@ func (p *pointIndex) query(min, max model3d.Coord3D, result *[]model3d.Coord3D) 
 }
 
 func appendConformedTriangle(result []model3d.Triangle, t model3d.Triangle,
-	index *pointIndex, tol float64, candidates *[]model3d.Coord3D,
+	index *pointIndex, tol float64, robust bool, candidates *[]model3d.Coord3D,
 ) []model3d.Triangle {
 	min := t.Min().AddScalar(-tol)
 	max := t.Max().AddScalar(tol)
 	*candidates = (*candidates)[:0]
 	index.query(min, max, candidates)
 	normal := t.Normal()
+	contains := pointInTriangle3D
+	if robust {
+		contains = pointInTriangle3DProjected
+	}
 	filtered := (*candidates)[:0]
 	for _, point := range *candidates {
 		if point == t[0] || point == t[1] || point == t[2] {
 			continue
 		}
-		if math.Abs(normal.Dot(point.Sub(t[0]))) <= tol && pointInTriangle3D(t, point, tol) {
+		if math.Abs(normal.Dot(point.Sub(t[0]))) <= tol && contains(t, point, tol) {
 			filtered = append(filtered, point)
 		}
 	}
@@ -2318,7 +2331,7 @@ func appendConformedTriangle(result []model3d.Triangle, t model3d.Triangle,
 			continue
 		}
 		for i, triangle := range triangles {
-			if pointInTriangle3D(triangle, point, tol) {
+			if contains(triangle, point, tol) {
 				replacement := make([]model3d.Triangle, 0, 3)
 				replacement = appendNondegenerate(replacement, model3d.Triangle{triangle[0], triangle[1], point}, tol)
 				replacement = appendNondegenerate(replacement, model3d.Triangle{triangle[1], triangle[2], point}, tol)
@@ -2369,6 +2382,47 @@ func pointInTriangle3D(triangle model3d.Triangle, point model3d.Coord3D, tol flo
 	u := 1 - v - w
 	parameterTolerance := tol / math.Max(math.Sqrt(math.Max(d00, d11)), tol)
 	return u >= -parameterTolerance && v >= -parameterTolerance && w >= -parameterTolerance
+}
+
+func pointInTriangle3DProjected(triangle model3d.Triangle, point model3d.Coord3D,
+	tol float64) bool {
+	a := triangle[1].Sub(triangle[0])
+	b := triangle[2].Sub(triangle[0])
+	normal := a.Cross(b)
+	if normal.NormSquared() == 0 {
+		return false
+	}
+	drop := 0
+	if math.Abs(normal.Y) > math.Abs(normal.X) {
+		drop = 1
+	}
+	if math.Abs(coordAxis(normal, 2)) > math.Abs(coordAxis(normal, drop)) {
+		drop = 2
+	}
+	project := func(value model3d.Coord3D) model2d.Coord {
+		switch drop {
+		case 0:
+			return model2d.XY(value.Y, value.Z)
+		case 1:
+			return model2d.XY(value.X, value.Z)
+		default:
+			return model2d.XY(value.X, value.Y)
+		}
+	}
+	projected := [3]model2d.Coord{
+		project(triangle[0]), project(triangle[1]), project(triangle[2]),
+	}
+	projectedPoint := project(point)
+	orientation := cross2D(projected[1].Sub(projected[0]), projected[2].Sub(projected[0]))
+	for i, start := range projected {
+		edge := projected[(i+1)%3].Sub(start)
+		side := cross2D(edge, projectedPoint.Sub(start))
+		limit := tol * math.Max(edge.Norm(), tol)
+		if (orientation > 0 && side < -limit) || (orientation < 0 && side > limit) {
+			return false
+		}
+	}
+	return true
 }
 
 func coordAxis(c model3d.Coord3D, axis int) float64 {
