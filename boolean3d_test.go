@@ -181,6 +181,70 @@ func TestConstrainedTriangleFacesCloseIntersections(t *testing.T) {
 	}
 }
 
+func TestInsertConstraintCavity2DFrogRegression(t *testing.T) {
+	// This is the small constraint cavity that previously failed while
+	// subtracting a marching-cubes cube from frog_high.stl. No crossed edge can
+	// be flipped: three form non-convex quadrilaterals, and the fourth
+	// replacement diagonal would still cross the requested constraint.
+	points := []model2d.Coord{
+		model2d.XY(0.0817725835414101, -0.0169521253826906),
+		model2d.XY(0.0762862427427548, -0.020513032074969212),
+		model2d.XY(0.07787449480580017, -0.01947985195197502),
+		model2d.XY(0.07819085265488634, -0.019273521359916113),
+		model2d.XY(0.08073728645863526, -0.01763226941160688),
+		model2d.XY(0.07728449155215023, -0.019863815605640406),
+		model2d.XY(0.08109670112602607, -0.01739380808834752),
+	}
+	triangles := []indexedTriangle2D{
+		{0, 2, 3},
+		{0, 2, 5},
+		{0, 5, 1},
+		{0, 1, 6},
+		{1, 6, 4},
+	}
+	for i, triangle := range triangles {
+		triangles[i] = orientedTriangle2D(triangle, points)
+	}
+	target := orderedEdge2D(3, 4)
+	edges := indexedTriangleEdges2D(triangles)
+	for edge, incident := range edges {
+		if len(incident) != 2 || !segmentsProperlyIntersect2D(
+			points[target[0]], points[target[1]], points[edge[0]], points[edge[1]], 1e-12,
+		) {
+			continue
+		}
+		first, second := triangles[incident[0]], triangles[incident[1]]
+		oppositeA := triangleOtherVertex2D(first, edge[0], edge[1])
+		oppositeB := triangleOtherVertex2D(second, edge[0], edge[1])
+		convex := segmentsProperlyIntersect2D(
+			points[edge[0]], points[edge[1]], points[oppositeA], points[oppositeB], 1e-12,
+		)
+		replacementCrosses := segmentsProperlyIntersect2D(
+			points[target[0]], points[target[1]], points[oppositeA], points[oppositeB], 1e-12,
+		)
+		if convex && !replacementCrosses {
+			t.Fatalf("crossed edge %v was unexpectedly flippable", edge)
+		}
+	}
+
+	protectedEdge := orderedEdge2D(0, 3)
+	result, err := insertConstraintCavity2D(
+		triangles, target, map[[2]int]bool{protectedEdge: true}, points, 1e-12,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resultEdges := indexedTriangleEdges2D(result)
+	for _, edge := range [][2]int{target, protectedEdge} {
+		if _, ok := resultEdges[edge]; !ok {
+			t.Fatalf("expected edge %v in recovered triangulation", edge)
+		}
+	}
+	if len(result) != len(triangles) {
+		t.Fatalf("triangle count changed from %d to %d", len(triangles), len(result))
+	}
+}
+
 func TestRandomDualContourBooleans(t *testing.T) {
 	const trials = 18
 	rng := rand.New(rand.NewSource(0x5eedc0de))

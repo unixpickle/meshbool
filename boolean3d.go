@@ -685,7 +685,6 @@ func constrainedTriangleFaces(triangle []model2d.Coord, cuts [][2]model2d.Coord,
 		for attempts := 0; attempts <= 3*len(triangles)+1; attempts++ {
 			edgeTriangles := indexedTriangleEdges2D(triangles)
 			if _, ok := edgeTriangles[target]; ok {
-				protected[target] = true
 				inserted = true
 				break
 			}
@@ -732,8 +731,13 @@ func constrainedTriangleFaces(triangle []model2d.Coord, cuts [][2]model2d.Coord,
 			}
 		}
 		if !inserted {
-			return nil, &TopologyError{Problem: "could not enforce triangle intersection edge"}
+			var err error
+			triangles, err = insertConstraintCavity2D(triangles, target, protected, points, tol)
+			if err != nil {
+				return nil, err
+			}
 		}
+		protected[target] = true
 	}
 
 	result := make([][]model2d.Coord, 0, len(triangles))
@@ -741,6 +745,158 @@ func constrainedTriangleFaces(triangle []model2d.Coord, cuts [][2]model2d.Coord,
 		result = append(result, []model2d.Coord{
 			points[triangle[0]], points[triangle[1]], points[triangle[2]],
 		})
+	}
+	return result, nil
+}
+
+func insertConstraintCavity2D(triangles []indexedTriangle2D, target [2]int,
+	protected map[[2]int]bool, points []model2d.Coord, tol float64,
+) ([]indexedTriangle2D, error) {
+	edges := indexedTriangleEdges2D(triangles)
+	removed := map[int]bool{}
+	for edge, incident := range edges {
+		if !segmentsProperlyIntersect2D(points[target[0]], points[target[1]],
+			points[edge[0]], points[edge[1]], tol) {
+			continue
+		}
+		if protected[edge] {
+			return nil, &TopologyError{Problem: "intersecting triangle constraints"}
+		}
+		for _, triangleIndex := range incident {
+			removed[triangleIndex] = true
+		}
+	}
+	if len(removed) == 0 {
+		return nil, &TopologyError{Problem: "could not enforce triangle intersection edge"}
+	}
+
+	boundaryCounts := map[[2]int]int{}
+	for triangleIndex := range removed {
+		triangle := triangles[triangleIndex]
+		for edge := 0; edge < 3; edge++ {
+			boundaryCounts[orderedEdge2D(triangle[edge], triangle[(edge+1)%3])]++
+		}
+	}
+	adjacent := map[int][]int{}
+	for edge, count := range boundaryCounts {
+		if count == 1 {
+			adjacent[edge[0]] = append(adjacent[edge[0]], edge[1])
+			adjacent[edge[1]] = append(adjacent[edge[1]], edge[0])
+		}
+	}
+	for vertex := range adjacent {
+		sort.Ints(adjacent[vertex])
+		if len(adjacent[vertex]) != 2 {
+			return nil, &TopologyError{Problem: "non-simple triangle constraint cavity"}
+		}
+	}
+	if len(adjacent[target[0]]) != 2 || len(adjacent[target[1]]) != 2 {
+		return nil, &TopologyError{Problem: "triangle constraint endpoint outside cavity boundary"}
+	}
+	walkBoundary := func(first int) ([]int, error) {
+		path := []int{target[0]}
+		previous, current := target[0], first
+		for len(path) <= len(adjacent)+1 {
+			path = append(path, current)
+			if current == target[1] {
+				return path, nil
+			}
+			neighbors := adjacent[current]
+			if len(neighbors) != 2 {
+				break
+			}
+			next := neighbors[0]
+			if next == previous {
+				next = neighbors[1]
+			}
+			previous, current = current, next
+		}
+		return nil, &TopologyError{Problem: "open triangle constraint cavity boundary"}
+	}
+	firstPath, err := walkBoundary(adjacent[target[0]][0])
+	if err != nil {
+		return nil, err
+	}
+	secondPath, err := walkBoundary(adjacent[target[0]][1])
+	if err != nil {
+		return nil, err
+	}
+
+	result := make([]indexedTriangle2D, 0, len(triangles)+2)
+	for triangleIndex, triangle := range triangles {
+		if !removed[triangleIndex] {
+			result = append(result, triangle)
+		}
+	}
+	for _, polygon := range [][]int{firstPath, secondPath} {
+		triangulated, err := triangulateIndexedPolygon2D(polygon, points, tol)
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, triangulated...)
+	}
+	resultEdges := indexedTriangleEdges2D(result)
+	if _, ok := resultEdges[target]; !ok {
+		return nil, &TopologyError{Problem: "could not enforce triangle intersection edge"}
+	}
+	for edge := range protected {
+		if _, ok := resultEdges[edge]; !ok {
+			return nil, &TopologyError{Problem: "triangle constraint cavity removed a protected edge"}
+		}
+	}
+	return result, nil
+}
+
+func triangulateIndexedPolygon2D(polygon []int, points []model2d.Coord,
+	tol float64,
+) ([]indexedTriangle2D, error) {
+	polygon = append([]int(nil), polygon...)
+	if len(polygon) < 3 {
+		return nil, &TopologyError{Problem: "triangle constraint cavity has fewer than three vertices"}
+	}
+	signedAreaTwice := 0.0
+	for i, vertex := range polygon {
+		signedAreaTwice += cross2D(points[vertex], points[polygon[(i+1)%len(polygon)]])
+	}
+	orientation := 1.0
+	if signedAreaTwice < 0 {
+		orientation = -1
+	}
+	var result []indexedTriangle2D
+	for len(polygon) > 3 {
+		ear := -1
+		for i, current := range polygon {
+			previous := polygon[(i+len(polygon)-1)%len(polygon)]
+			next := polygon[(i+1)%len(polygon)]
+			areaTwice := cross2D(points[current].Sub(points[previous]),
+				points[next].Sub(points[current])) * orientation
+			if areaTwice <= 2*tol*tol {
+				continue
+			}
+			candidate := orientedTriangle2D(indexedTriangle2D{previous, current, next}, points)
+			containsVertex := false
+			for _, vertex := range polygon {
+				if vertex != previous && vertex != current && vertex != next &&
+					pointInIndexedTriangle2D(points[vertex], candidate, points, tol) {
+					containsVertex = true
+					break
+				}
+			}
+			if !containsVertex {
+				ear = i
+				result = append(result, candidate)
+				break
+			}
+		}
+		if ear < 0 {
+			return nil, &TopologyError{Problem: "could not triangulate triangle constraint cavity"}
+		}
+		polygon = append(polygon[:ear], polygon[ear+1:]...)
+	}
+	result = appendIndexedTriangle2D(result,
+		indexedTriangle2D{polygon[0], polygon[1], polygon[2]}, points, tol)
+	if len(result) == 0 {
+		return nil, &TopologyError{Problem: "degenerate triangle constraint cavity"}
 	}
 	return result, nil
 }
