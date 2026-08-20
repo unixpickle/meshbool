@@ -105,6 +105,27 @@ func TestDualContourCubeSphereDifference(t *testing.T) {
 	assertValidMesh3D(t, result)
 }
 
+func TestMarchingCubesCubeSphereDifference(t *testing.T) {
+	const resolution = 0.1
+	for _, offset := range []model3d.Coord3D{{}, model3d.Ones(0.0001)} {
+		t.Run(fmt.Sprintf("offset_%g", offset.X), func(t *testing.T) {
+			cube := model3d.MarchingCubesSearch(
+				model3d.NewRect(model3d.Coord3D{}, model3d.Ones(1)), resolution, 8,
+			)
+			sphereSolid := &model3d.Sphere{Center: offset, Radius: 1}
+			sphere := model3d.MarchingCubesSearch(sphereSolid, resolution, 8)
+			result, err := Difference3D(DefaultOptions3D(), cube, sphere)
+			if err != nil {
+				t.Fatal(err)
+			}
+			assertValidMesh3D(t, result)
+			if result.NumTriangles() == 0 || result.Volume() <= 0 {
+				t.Fatal("difference unexpectedly produced an empty solid")
+			}
+		})
+	}
+}
+
 func TestRandomDualContourBooleans(t *testing.T) {
 	const trials = 18
 	rng := rand.New(rand.NewSource(0x5eedc0de))

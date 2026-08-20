@@ -38,12 +38,19 @@ func TestFilteredPredicatesMatchExact(t *testing.T) {
 				t.Fatalf("trial %d axis %d: filtered 2D sign %d, exact sign %d", trial, axis, got, want)
 			}
 		}
+		direction := exactCoordFromFinite(model3d.XYZ(
+			float64(rng.Intn(5)+1), float64(rng.Intn(5)+1), float64(rng.Intn(5)+1),
+		))
+		triangle := exactTriangle3D{points[0], points[1], points[2]}
+		if got, want := filteredNormalDotSign(triangle, direction),
+			exactNormalDot(triangle, direction).Sign(); got != want {
+			t.Fatalf("trial %d: filtered normal dot sign %d, exact sign %d", trial, got, want)
+		}
 
 		edgeA := exactInterpolate(points[0], points[1], parameter)
 		edgeB := exactInterpolate(points[0], points[2], parameter)
 		query := exactInterpolate(edgeA, edgeB,
 			new(big.Rat).SetFrac64(int64(rng.Intn(2001)-500), 1000))
-		triangle := exactTriangle3D{points[0], points[1], points[2]}
 		if got, want := filteredPointTriangleLocation(query, triangle),
 			exactPointTriangleLocation(query, triangle); got != want {
 			t.Fatalf("trial %d: filtered location %d, exact location %d", trial, got, want)

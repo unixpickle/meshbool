@@ -550,6 +550,14 @@ func constrainedTriangleFaces(triangle []model2d.Coord, cuts [][2]model2d.Coord,
 		if index, ok := pointIndices[point]; ok {
 			return index
 		}
+		// Projection introduces a final float64 rounding after the exact 3D
+		// intersection. Canonicalize consistently with the output mesh so one
+		// geometric node cannot become a microscopic, unenforceable constraint.
+		for index, existing := range points {
+			if existing.Dist(point) <= tol {
+				return index
+			}
+		}
 		index := len(points)
 		points = append(points, point)
 		pointIndices[point] = index

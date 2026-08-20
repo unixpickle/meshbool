@@ -20,9 +20,16 @@ type exactTriangleIntersector struct {
 }
 
 type exactMeshClassifier struct {
-	triangles map[*model3d.Triangle]exactTriangle3D
-	index     *triangleIndex
-	min, max  model3d.Coord3D
+	triangles  map[*model3d.Triangle]exactTriangle3D
+	index      *triangleIndex
+	min, max   model3d.Coord3D
+	directions []exactRayDirection
+}
+
+type exactRayDirection struct {
+	approximate model3d.Coord3D
+	exact       exactCoord3D
+	axis        int
 }
 
 func newExactMeshClassifier(triangles []*model3d.Triangle, index *triangleIndex) *exactMeshClassifier {
@@ -30,21 +37,27 @@ func newExactMeshClassifier(triangles []*model3d.Triangle, index *triangleIndex)
 		triangles: map[*model3d.Triangle]exactTriangle3D{},
 		index:     index,
 	}
+	// Axis rays are cheapest. The oblique rays handle exact edge and vertex
+	// hits without perturbing the query point or weakening exact predicates.
+	for i, direction := range []model3d.Coord3D{
+		model3d.X(1), model3d.Y(1), model3d.Z(1),
+		model3d.XYZ(1, 1, 1), model3d.XYZ(1, 2, 4),
+		model3d.XYZ(4, 2, 1), model3d.XYZ(2, 5, 3),
+	} {
+		axis := -1
+		if i < 3 {
+			axis = i
+		}
+		classifier.directions = append(classifier.directions, exactRayDirection{
+			approximate: direction,
+			exact:       exactCoordFromFinite(direction),
+			axis:        axis,
+		})
+	}
 	if index != nil {
 		classifier.min, classifier.max = index.min, index.max
 	}
 	return classifier
-}
-
-func setCoordAxis(point *model3d.Coord3D, axis int, value float64) {
-	switch axis {
-	case 0:
-		point.X = value
-	case 1:
-		point.Y = value
-	case 2:
-		point.Z = value
-	}
 }
 
 func (e *exactMeshClassifier) contains(point model3d.Coord3D) (bool, error) {
@@ -56,10 +69,17 @@ func (e *exactMeshClassifier) contains(point model3d.Coord3D) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	for axis := 0; axis < 3; axis++ {
+	for _, direction := range e.directions {
 		min, max := point, point
-		setCoordAxis(&min, axis, coordAxis(point, axis))
-		setCoordAxis(&max, axis, coordAxis(e.max, axis))
+		if direction.approximate.X > 0 {
+			max.X = e.max.X
+		}
+		if direction.approximate.Y > 0 {
+			max.Y = e.max.Y
+		}
+		if direction.approximate.Z > 0 {
+			max.Z = e.max.Z
+		}
 		var candidates []*model3d.Triangle
 		e.index.query(min, max, &candidates)
 		collisions := 0
@@ -69,7 +89,13 @@ func (e *exactMeshClassifier) contains(point model3d.Coord3D) (bool, error) {
 			if err != nil {
 				return false, err
 			}
-			denominatorSign := filteredOrient2DSign(triangle[0], triangle[1], triangle[2], axis)
+			var denominatorSign int
+			if direction.axis >= 0 {
+				denominatorSign = filteredOrient2DSign(
+					triangle[0], triangle[1], triangle[2], direction.axis)
+			} else {
+				denominatorSign = filteredNormalDotSign(triangle, direction.exact)
+			}
 			sideSign := filteredOrient3DSign(triangle[0], triangle[1], triangle[2], exactPoint)
 			if denominatorSign == 0 {
 				if sideSign == 0 {
@@ -81,19 +107,15 @@ func (e *exactMeshClassifier) contains(point model3d.Coord3D) (bool, error) {
 			if sideSign != 0 && sideSign == denominatorSign {
 				continue
 			}
-			denominator := exactOrient2D(triangle[0], triangle[1], triangle[2], axis)
+			var denominator *big.Rat
+			if direction.axis >= 0 {
+				denominator = exactOrient2D(triangle[0], triangle[1], triangle[2], direction.axis)
+			} else {
+				denominator = exactNormalDot(triangle, direction.exact)
+			}
 			side := exactOrient3D(triangle[0], triangle[1], triangle[2], exactPoint)
 			parameter := new(big.Rat).Quo(new(big.Rat).Neg(side), denominator)
-			intersection := exactPoint
-			switch axis {
-			case 0:
-				intersection.x = new(big.Rat).Add(intersection.x, parameter)
-			case 1:
-				intersection.y = new(big.Rat).Add(intersection.y, parameter)
-			case 2:
-				intersection.z = new(big.Rat).Add(intersection.z, parameter)
-			}
-			intersection.bounds[axis] = ratInterval(exactCoordAxis(intersection, axis))
+			intersection := exactAddScaled(exactPoint, direction.exact, parameter)
 			location := filteredPointTriangleLocation(intersection, triangle)
 			if location == 0 {
 				continue
@@ -217,7 +239,15 @@ func (e *exactTriangleIntersector) floatPoint(point exactCoord3D) (model3d.Coord
 }
 
 func exactCoordFromFloat(point model3d.Coord3D) (exactCoord3D, error) {
-	result := exactCoord3D{
+	if math.IsNaN(point.X) || math.IsNaN(point.Y) || math.IsNaN(point.Z) ||
+		math.IsInf(point.X, 0) || math.IsInf(point.Y, 0) || math.IsInf(point.Z, 0) {
+		return exactCoord3D{}, fmt.Errorf("meshbool: input mesh contains a non-finite coordinate")
+	}
+	return exactCoordFromFinite(point), nil
+}
+
+func exactCoordFromFinite(point model3d.Coord3D) exactCoord3D {
+	return exactCoord3D{
 		x: new(big.Rat).SetFloat64(point.X),
 		y: new(big.Rat).SetFloat64(point.Y),
 		z: new(big.Rat).SetFloat64(point.Z),
@@ -227,10 +257,6 @@ func exactCoordFromFloat(point model3d.Coord3D) (exactCoord3D, error) {
 			{min: point.Z, max: point.Z},
 		},
 	}
-	if result.x == nil || result.y == nil || result.z == nil {
-		return exactCoord3D{}, fmt.Errorf("meshbool: input mesh contains a non-finite coordinate")
-	}
-	return result, nil
 }
 
 func exactTrianglesCoplanar(a, b exactTriangle3D) bool {
@@ -293,6 +319,28 @@ func exactInterpolate(a, b exactCoord3D, t *big.Rat) exactCoord3D {
 	return result
 }
 
+func exactAddScaled(point, direction exactCoord3D, scale *big.Rat) exactCoord3D {
+	addScaled := func(value, delta *big.Rat) *big.Rat {
+		if delta.Sign() == 0 {
+			return value
+		}
+		return new(big.Rat).Add(value, new(big.Rat).Mul(scale, delta))
+	}
+	result := exactCoord3D{
+		x: addScaled(point.x, direction.x),
+		y: addScaled(point.y, direction.y),
+		z: addScaled(point.z, direction.z),
+	}
+	for axis, value := range []*big.Rat{result.x, result.y, result.z} {
+		if exactCoordAxis(direction, axis).Sign() == 0 {
+			result.bounds[axis] = point.bounds[axis]
+		} else {
+			result.bounds[axis] = ratInterval(value)
+		}
+	}
+	return result
+}
+
 func ratInterval(value *big.Rat) floatInterval {
 	approximation, exact := value.Float64()
 	if exact {
@@ -340,6 +388,33 @@ func filteredOrient3DSign(a, b, c, point exactCoord3D) int {
 		return sign
 	}
 	return exactOrient3D(a, b, c, point).Sign()
+}
+
+func exactNormalDot(triangle exactTriangle3D, direction exactCoord3D) *big.Rat {
+	normal := exactCross(exactSubtract(triangle[1], triangle[0]),
+		exactSubtract(triangle[2], triangle[0]))
+	return new(big.Rat).Add(
+		new(big.Rat).Add(new(big.Rat).Mul(normal.x, direction.x),
+			new(big.Rat).Mul(normal.y, direction.y)),
+		new(big.Rat).Mul(normal.z, direction.z),
+	)
+}
+
+func filteredNormalDotSign(triangle exactTriangle3D, direction exactCoord3D) int {
+	ab := intervalCoordSubtract(triangle[1], triangle[0])
+	ac := intervalCoordSubtract(triangle[2], triangle[0])
+	crossX := intervalSubtract(intervalMultiply(ab[1], ac[2]), intervalMultiply(ab[2], ac[1]))
+	crossY := intervalSubtract(intervalMultiply(ab[2], ac[0]), intervalMultiply(ab[0], ac[2]))
+	crossZ := intervalSubtract(intervalMultiply(ab[0], ac[1]), intervalMultiply(ab[1], ac[0]))
+	dot := intervalAdd(
+		intervalAdd(intervalMultiply(crossX, direction.bounds[0]),
+			intervalMultiply(crossY, direction.bounds[1])),
+		intervalMultiply(crossZ, direction.bounds[2]),
+	)
+	if sign := intervalSign(dot); sign != 0 {
+		return sign
+	}
+	return exactNormalDot(triangle, direction).Sign()
 }
 
 func exactSubtract(a, b exactCoord3D) exactCoord3D {
