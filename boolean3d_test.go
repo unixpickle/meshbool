@@ -127,6 +127,22 @@ func TestMarchingCubesCubeSphereDifference(t *testing.T) {
 	}
 }
 
+func TestMarchingCubesShiftedCubeSphereUnion(t *testing.T) {
+	const resolution = 0.1
+	cube := model3d.MarchingCubesSearch(
+		model3d.NewRect(model3d.Coord3D{}, model3d.Ones(1)), resolution, 8,
+	)
+	offset := model3d.Ones(0.0001)
+	sphere := model3d.MarchingCubesSearch(
+		&model3d.Sphere{Center: offset, Radius: 1}, resolution, 8,
+	)
+	result, err := Union3D(DefaultOptions3D(), cube, sphere)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertValidMesh3D(t, result)
+}
+
 func TestConstrainedTriangleFacesCloseIntersections(t *testing.T) {
 	// These are projected intersections from float32 GPU-generated cube and
 	// sphere meshes. Several nodes are extremely close, but remain distinct at
@@ -709,7 +725,48 @@ func assertValidMesh3D(t *testing.T, mesh *model3d.Mesh) {
 	if !mesh.Orientable() {
 		t.Fatal("mesh is not orientable")
 	}
-	if intersections := mesh.SelfIntersections(); intersections != 0 {
+	intersections, err := exactSelfIntersections(mesh)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if intersections != 0 {
 		t.Fatalf("mesh has %d self-intersections", intersections)
+	}
+}
+
+func TestExactSelfIntersections(t *testing.T) {
+	shared := model3d.XYZ(0.8604515624999995, -0.09990000000000027, 0.5000999999999998)
+	nearContact := model3d.NewMeshTriangles([]*model3d.Triangle{
+		{
+			model3d.XYZ(0.8000999999999997, -0.09990000000000027, 0.5917015624999997),
+			shared,
+			model3d.XYZ(0.800160340734126, -0.0001953125, 0.6),
+		},
+		{
+			shared,
+			model3d.XYZ(0.8004729614257807, -0.0001953125, 0.5998046875),
+			model3d.XYZ(0.8001604696673186, -0.0001953125, 0.5999998043052838),
+		},
+	})
+	crossing := model3d.NewMeshTriangles([]*model3d.Triangle{
+		{model3d.XYZ(-1, -1, 0), model3d.XYZ(1, -1, 0), model3d.XYZ(0, 1, 0)},
+		{model3d.XYZ(0, -0.5, -1), model3d.XYZ(0, -0.5, 1), model3d.XYZ(0, 0.5, 0)},
+	})
+	for name, test := range map[string]struct {
+		mesh *model3d.Mesh
+		want int
+	}{
+		"near shared vertex": {nearContact, 0},
+		"crossing":           {crossing, 1},
+	} {
+		t.Run(name, func(t *testing.T) {
+			got, err := exactSelfIntersections(test.mesh)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != test.want {
+				t.Fatalf("got %d intersections; want %d", got, test.want)
+			}
+		})
 	}
 }

@@ -1323,10 +1323,65 @@ func validateResultTopology(mesh *model3d.Mesh) (*model3d.Mesh, error) {
 	if !mesh.Orientable() {
 		return nil, &TopologyError{Problem: "non-orientable surface"}
 	}
-	if intersections := mesh.SelfIntersections(); intersections != 0 {
+	intersections, err := exactSelfIntersections(mesh)
+	if err != nil {
+		return nil, err
+	}
+	if intersections != 0 {
 		return nil, &TopologyError{Problem: "self-intersections", Count: intersections}
 	}
 	return mesh, nil
+}
+
+func exactSelfIntersections(mesh *model3d.Mesh) (int, error) {
+	// The model3d collider is an efficient broad phase but can report tiny,
+	// direction-dependent intersections at numerical near-contacts. If it sees
+	// nothing, retain its existing behavior. Otherwise, confirm every reported
+	// pair with exact predicates before rejecting the mesh.
+	if mesh.SelfIntersections() == 0 {
+		return 0, nil
+	}
+	triangles := sortedTriangles(mesh)
+	indices := make(map[*model3d.Triangle]int, len(triangles))
+	for index, triangle := range triangles {
+		indices[triangle] = index
+	}
+	spatialIndex := newTriangleIndex(triangles)
+	intersector := newExactTriangleIntersector()
+	count := 0
+	for index, triangle := range triangles {
+		var candidates []*model3d.Triangle
+		spatialIndex.query(triangle.Min(), triangle.Max(), &candidates)
+		for _, candidate := range candidates {
+			if indices[candidate] <= index || trianglesShareEdge(triangle, candidate) {
+				continue
+			}
+			if len(triangle.TriangleCollisions(candidate)) == 0 &&
+				len(candidate.TriangleCollisions(triangle)) == 0 {
+				continue
+			}
+			intersection, err := intersector.intersection(triangle, candidate)
+			if err != nil {
+				return 0, err
+			}
+			if len(intersection) != 0 {
+				count++
+			}
+		}
+	}
+	return count, nil
+}
+
+func trianglesShareEdge(a, b *model3d.Triangle) bool {
+	common := 0
+	for _, pointA := range a {
+		for _, pointB := range b {
+			if pointA == pointB {
+				common++
+			}
+		}
+	}
+	return common >= 2
 }
 
 type contactEdgeTriangle struct {
