@@ -90,6 +90,161 @@ func TestEqualCubesShiftedByTenPercent(t *testing.T) {
 	}
 }
 
+func TestDualContourCubeSphereDifference(t *testing.T) {
+	const resolution = 0.1
+	cube := model3d.DualContour(
+		model3d.NewRect(model3d.Coord3D{}, model3d.Ones(1)), resolution, false, false,
+	)
+	sphere := model3d.DualContour(
+		&model3d.Sphere{Center: model3d.Z(0.1), Radius: 0.9}, resolution, false, false,
+	)
+	result, err := Difference3D(DefaultOptions3D(), cube, sphere)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertValidMesh3D(t, result)
+}
+
+func TestRandomDualContourBooleans(t *testing.T) {
+	const trials = 18
+	rng := rand.New(rand.NewSource(0x5eedc0de))
+	operations := []string{"union", "intersection", "difference"}
+	for trial := 0; trial < trials; trial++ {
+		shapeA, shapeB, resolution := randomDualContourPair(rng, trial%3)
+		operation := operations[trial%len(operations)]
+		t.Run(fmt.Sprintf("%02d_%s_%s_%s", trial, shapeA.name, shapeB.name, operation), func(t *testing.T) {
+			meshA := model3d.DualContour(shapeA.solid, resolution, false, false)
+			meshB := model3d.DualContour(shapeB.solid, resolution, false, false)
+			scale := math.Ldexp(1, rng.Intn(3)-1)
+			offset := model3d.XYZ(
+				float64(rng.Intn(5)-2)*0.25,
+				float64(rng.Intn(5)-2)*0.25,
+				float64(rng.Intn(5)-2)*0.25,
+			)
+			meshA = meshA.Scale(scale).Translate(offset)
+			meshB = meshB.Scale(scale).Translate(offset)
+			if problem := dualContourInputProblem(meshA); problem != "" {
+				t.Fatalf("dual-contoured %s input is invalid before boolean: %s", shapeA.name, problem)
+			}
+			if problem := dualContourInputProblem(meshB); problem != "" {
+				t.Fatalf("dual-contoured %s input is invalid before boolean: %s", shapeB.name, problem)
+			}
+
+			var result *model3d.Mesh
+			var err error
+			switch operation {
+			case "union":
+				result, err = Union3D(DefaultOptions3D(), meshA, meshB)
+			case "intersection":
+				result, err = Intersection3D(DefaultOptions3D(), meshA, meshB)
+			case "difference":
+				result, err = Difference3D(DefaultOptions3D(), meshA, meshB)
+			}
+			if err != nil {
+				t.Fatalf("%s of dual-contoured %s and %s: %v", operation, shapeA.name, shapeB.name, err)
+			}
+			assertValidMesh3D(t, result)
+		})
+	}
+}
+
+func dualContourInputProblem(mesh *model3d.Mesh) string {
+	if mesh.NeedsRepair() {
+		return "edges do not each have two incident triangles"
+	}
+	if singular := mesh.SingularVertices(); len(singular) != 0 {
+		return fmt.Sprintf("%d singular vertices", len(singular))
+	}
+	if !mesh.Orientable() {
+		return "non-orientable surface"
+	}
+	if intersections := mesh.SelfIntersections(); intersections != 0 {
+		return fmt.Sprintf("%d self-intersections", intersections)
+	}
+	return ""
+}
+
+type namedSolid3D struct {
+	name  string
+	solid model3d.Solid
+}
+
+func randomDualContourPair(rng *rand.Rand, kind int) (namedSolid3D, namedSolid3D, float64) {
+	origin := model3d.XYZ(
+		randomRange(rng, -0.2, 0.2),
+		randomRange(rng, -0.2, 0.2),
+		randomRange(rng, -0.2, 0.2),
+	)
+	resolution := randomRange(rng, 0.075, 0.11)
+	switch kind {
+	case 0:
+		size := model3d.XYZ(
+			randomRange(rng, 0.8, 1.25),
+			randomRange(rng, 0.8, 1.25),
+			randomRange(rng, 0.8, 1.25),
+		)
+		radius := randomRange(rng, 0.6, 0.95)
+		return namedSolid3D{
+				name:  "box",
+				solid: model3d.NewRect(origin, origin.Add(size)),
+			}, namedSolid3D{
+				name: "sphere",
+				solid: &model3d.Sphere{
+					Center: origin.Add(size.Scale(0.5)).Add(model3d.XYZ(
+						randomRange(rng, -0.25, 0.25),
+						randomRange(rng, -0.25, 0.25),
+						randomRange(rng, -0.25, 0.25),
+					)),
+					Radius: radius,
+				},
+			}, resolution
+	case 1:
+		radiusA := randomRange(rng, 0.65, 1.0)
+		radiusB := randomRange(rng, 0.45, 0.85)
+		return namedSolid3D{
+				name:  "sphere",
+				solid: &model3d.Sphere{Center: origin, Radius: radiusA},
+			}, namedSolid3D{
+				name: "sphere",
+				solid: &model3d.Sphere{
+					Center: origin.Add(model3d.XYZ(
+						randomRange(rng, -0.2, 0.2),
+						randomRange(rng, -0.2, 0.2),
+						randomRange(rng, -0.2, 0.2),
+					)),
+					Radius: radiusB,
+				},
+			}, resolution
+	default:
+		sizeA := model3d.XYZ(
+			randomRange(rng, 0.75, 1.25),
+			randomRange(rng, 0.75, 1.25),
+			randomRange(rng, 0.75, 1.25),
+		)
+		sizeB := model3d.XYZ(
+			randomRange(rng, 0.75, 1.25),
+			randomRange(rng, 0.75, 1.25),
+			randomRange(rng, 0.75, 1.25),
+		)
+		offset := model3d.XYZ(
+			randomRange(rng, 0.05, 0.3),
+			randomRange(rng, -0.15, 0.15),
+			randomRange(rng, -0.15, 0.15),
+		)
+		return namedSolid3D{
+				name:  "box",
+				solid: model3d.NewRect(origin, origin.Add(sizeA)),
+			}, namedSolid3D{
+				name:  "box",
+				solid: model3d.NewRect(origin.Add(offset), origin.Add(offset).Add(sizeB)),
+			}, resolution
+	}
+}
+
+func randomRange(rng *rand.Rand, min, max float64) float64 {
+	return min + rng.Float64()*(max-min)
+}
+
 func TestCoincidentBoxes(t *testing.T) {
 	a := model3d.NewMeshRect(model3d.XYZ(-1, -1, -1), model3d.XYZ(1, 1, 1))
 	b := a.DeepCopy()
@@ -402,7 +557,7 @@ func TestOptions3D(t *testing.T) {
 
 	planarLimited := DefaultOptions3D()
 	planarLimited.PlanarOptions.MaxInputSegments = 1
-	result, err = Union3D(planarLimited, a, b)
+	result, err = Union3D(planarLimited, a, a.DeepCopy())
 	complexity, ok = err.(*ComplexityError)
 	if result != nil || !ok || complexity.Stage != "planar input segments" {
 		t.Fatalf("planar limit was not propagated: result=%v err=%#v", result, err)

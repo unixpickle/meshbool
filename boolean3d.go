@@ -11,6 +11,7 @@ import (
 )
 
 const (
+	arithmeticToleranceRelative      = 1e-12
 	defaultMaxInputTriangles         = 200_000
 	defaultMaxFragmentsPerTriangle   = 4_096
 	defaultMaxTotalFragments         = 200_000
@@ -271,16 +272,18 @@ func booleanMeshPairLocal(options Options3D, a, b *model3d.Mesh, kind meshBoolea
 	}
 	trianglesA, trianglesB := sortedTriangles(a), sortedTriangles(b)
 	indexA, indexB := newTriangleIndex(trianglesA), newTriangleIndex(trianglesB)
-	colliderA := model3d.GroupedTrianglesToCollider(trianglesA)
-	colliderB := model3d.GroupedTrianglesToCollider(trianglesB)
-	solidA := model3d.NewColliderSolid(colliderA)
-	solidB := model3d.NewColliderSolid(colliderB)
+	classifierA := newExactMeshClassifier(trianglesA, indexA)
+	classifierB := newExactMeshClassifier(trianglesB, indexB)
 	scale := meshScale([]*model3d.Mesh{a, b})
-	tol := math.Max(scale*1e-9, math.SmallestNonzeroFloat64*1024)
+	tol := math.Max(scale*arithmeticToleranceRelative, math.SmallestNonzeroFloat64*1024)
 	candidatePairs := 0
+	relationsA, relationsB, err := buildTriangleRelations(options, trianglesA, indexB, tol, &candidatePairs)
+	if err != nil {
+		return nil, err
+	}
 	var fragments []*polygon
 	newFragments, err := splitAndClassifyMesh(
-		options, trianglesA, colliderB, indexB, solidA, solidB, kind, tol, true, &candidatePairs)
+		options, trianglesA, relationsA, classifierA, classifierB, kind, tol, true)
 	if err != nil {
 		return nil, err
 	}
@@ -289,7 +292,7 @@ func booleanMeshPairLocal(options Options3D, a, b *model3d.Mesh, kind meshBoolea
 		return nil, err
 	}
 	newFragments, err = splitAndClassifyMesh(
-		options, trianglesB, colliderA, indexA, solidA, solidB, kind, tol, false, &candidatePairs)
+		options, trianglesB, relationsB, classifierA, classifierB, kind, tol, false)
 	if err != nil {
 		return nil, err
 	}
@@ -300,9 +303,60 @@ func booleanMeshPairLocal(options Options3D, a, b *model3d.Mesh, kind meshBoolea
 	return polygonsMesh(options, fragments, scale)
 }
 
-func splitAndClassifyMesh(options Options3D, triangles []*model3d.Triangle, other model3d.TriangleCollider, otherIndex *triangleIndex,
-	solidA, solidB model3d.Solid, kind meshBooleanKind, tol float64, sourceA bool,
-	candidatePairs *int) ([]*polygon, error) {
+type triangleRelation struct {
+	cuts   []model3d.Segment
+	nearby []*model3d.Triangle
+}
+
+func buildTriangleRelations(options Options3D, trianglesA []*model3d.Triangle,
+	indexB *triangleIndex, tol float64, candidatePairs *int,
+) (map[*model3d.Triangle]*triangleRelation, map[*model3d.Triangle]*triangleRelation, error) {
+	resultA := map[*model3d.Triangle]*triangleRelation{}
+	resultB := map[*model3d.Triangle]*triangleRelation{}
+	intersector := newExactTriangleIntersector()
+	for _, triangleA := range trianglesA {
+		var nearby []*model3d.Triangle
+		indexB.query(triangleA.Min(), triangleA.Max(), &nearby)
+		sort.Slice(nearby, func(i, j int) bool {
+			keyI, _ := makeTriangleKey(*nearby[i])
+			keyJ, _ := makeTriangleKey(*nearby[j])
+			return triangleKeyLess(keyI, keyJ)
+		})
+		*candidatePairs += len(nearby)
+		if err := checkComplexity("triangle candidate pairs", *candidatePairs,
+			options.MaxTriangleCandidatePairs); err != nil {
+			return nil, nil, err
+		}
+		relationA := &triangleRelation{}
+		resultA[triangleA] = relationA
+		for _, triangleB := range nearby {
+			relationB := resultB[triangleB]
+			if relationB == nil {
+				relationB = &triangleRelation{}
+				resultB[triangleB] = relationB
+			}
+			normalA, normalB := triangleA.Normal(), triangleB.Normal()
+			if math.Abs(normalA.Dot(normalB)) >= 1-1e-12 &&
+				math.Abs(normalA.Dot(triangleB[0].Sub(triangleA[0]))) <= tol {
+				relationA.nearby = append(relationA.nearby, triangleB)
+				relationB.nearby = append(relationB.nearby, triangleA)
+			}
+			cuts, err := intersector.intersection(triangleA, triangleB)
+			if err != nil {
+				return nil, nil, err
+			}
+			for _, cut := range cuts {
+				relationA.cuts = append(relationA.cuts, cut)
+				relationB.cuts = append(relationB.cuts, cut)
+			}
+		}
+	}
+	return resultA, resultB, nil
+}
+
+func splitAndClassifyMesh(options Options3D, triangles []*model3d.Triangle,
+	relations map[*model3d.Triangle]*triangleRelation, classifierA, classifierB *exactMeshClassifier,
+	kind meshBooleanKind, tol float64, sourceA bool) ([]*polygon, error) {
 	var result []*polygon
 	for _, tri := range triangles {
 		if tri.Area() <= tol*tol {
@@ -311,26 +365,44 @@ func splitAndClassifyMesh(options Options3D, triangles []*model3d.Triangle, othe
 		normal := tri.Normal()
 		u, v := planeBasis(normal)
 		origin := tri[0]
+		relation := relations[tri]
+		if relation == nil {
+			relation = &triangleRelation{}
+		}
 		project := func(point model3d.Coord3D) model2d.Coord {
 			delta := point.Sub(origin)
 			return model2d.XY(u.Dot(delta), v.Dot(delta))
 		}
+		type projectedNode struct {
+			projected model2d.Coord
+			original  model3d.Coord3D
+		}
+		nodes := make([]projectedNode, 0, 3+2*len(relation.cuts))
+		for _, point := range tri {
+			nodes = append(nodes, projectedNode{projected: project(point), original: point})
+		}
+		for _, cut := range relation.cuts {
+			for _, point := range cut {
+				nodes = append(nodes, projectedNode{projected: project(point), original: point})
+			}
+		}
+		nodeSnapTol := tol * 128
 		lift := func(point model2d.Coord) model3d.Coord3D {
+			for _, node := range nodes {
+				if point.Dist(node.projected) <= nodeSnapTol {
+					return node.original
+				}
+			}
 			return origin.Add(u.Scale(point.X)).Add(v.Scale(point.Y))
 		}
 		pieces := [][]model2d.Coord{{project(tri[0]), project(tri[1]), project(tri[2])}}
 		var splitLines [][2]model2d.Coord
-		for _, collision := range other.TriangleCollisions(tri) {
+		for _, collision := range relation.cuts {
 			splitLines = append(splitLines, [2]model2d.Coord{project(collision[0]), project(collision[1])})
 		}
-		var nearby []*model3d.Triangle
-		otherIndex.query(tri.Min().AddScalar(-tol), tri.Max().AddScalar(tol), &nearby)
-		*candidatePairs += len(nearby)
-		if err := checkComplexity("triangle candidate pairs", *candidatePairs, options.MaxTriangleCandidatePairs); err != nil {
-			return nil, err
-		}
 		projectedTri := []model2d.Coord{project(tri[0]), project(tri[1]), project(tri[2])}
-		for _, candidate := range nearby {
+		hasCoplanarOverlap := false
+		for _, candidate := range relation.nearby {
 			candidateNormal := candidate.Normal()
 			if math.Abs(normal.Dot(candidateNormal)) < 1-1e-12 ||
 				math.Abs(normal.Dot(candidate[0].Sub(tri[0]))) > tol {
@@ -342,32 +414,48 @@ func splitAndClassifyMesh(options Options3D, triangles []*model3d.Triangle, othe
 			if !convexPolygonsOverlap2D(projectedTri, projectedCandidate, tol) {
 				continue
 			}
+			hasCoplanarOverlap = true
 			for i, point := range projectedCandidate {
 				splitLines = append(splitLines, [2]model2d.Coord{point, projectedCandidate[(i+1)%3]})
 			}
 		}
-		for _, splitLine := range splitLines {
-			p1, p2 := splitLine[0], splitLine[1]
-			if p1.Dist(p2) <= tol {
-				continue
-			}
-			var next [][]model2d.Coord
-			for _, piece := range pieces {
-				frontPiece, backPiece := splitPolygon2D(piece, p1, p2, tol)
-				if len(frontPiece) >= 3 {
-					next = append(next, frontPiece)
-					if err := checkComplexity("fragments for one triangle", len(next), options.MaxFragmentsPerTriangle); err != nil {
-						return nil, err
+		if hasCoplanarOverlap {
+			for _, splitLine := range splitLines {
+				p1, p2 := splitLine[0], splitLine[1]
+				if p1.Dist(p2) <= tol {
+					continue
+				}
+				var next [][]model2d.Coord
+				for _, piece := range pieces {
+					frontPiece, backPiece := splitPolygon2D(piece, p1, p2, tol)
+					if len(frontPiece) >= 3 {
+						next = append(next, frontPiece)
+						if err := checkComplexity("fragments for one triangle", len(next), options.MaxFragmentsPerTriangle); err != nil {
+							return nil, err
+						}
+					}
+					if len(backPiece) >= 3 {
+						next = append(next, backPiece)
+						if err := checkComplexity("fragments for one triangle", len(next), options.MaxFragmentsPerTriangle); err != nil {
+							return nil, err
+						}
 					}
 				}
-				if len(backPiece) >= 3 {
-					next = append(next, backPiece)
-					if err := checkComplexity("fragments for one triangle", len(next), options.MaxFragmentsPerTriangle); err != nil {
-						return nil, err
-					}
-				}
+				pieces = next
 			}
-			pieces = next
+		} else {
+			if err := checkComplexity("fragments for one triangle", 1+2*len(splitLines),
+				options.MaxFragmentsPerTriangle); err != nil {
+				return nil, err
+			}
+			var err error
+			pieces, err = constrainedTriangleFaces(projectedTri, splitLines, tol)
+			if err != nil {
+				return nil, err
+			}
+			if err := checkComplexity("fragments for one triangle", len(pieces), options.MaxFragmentsPerTriangle); err != nil {
+				return nil, err
+			}
 		}
 		for _, piece := range pieces {
 			center2d := model2d.Coord{}
@@ -376,44 +464,68 @@ func splitAndClassifyMesh(options Options3D, triangles []*model3d.Triangle, othe
 				center2d = center2d.Add(point)
 				vertices[i] = lift(point)
 			}
-			center := lift(center2d.Scale(1 / float64(len(piece))))
-			offset := tol * 4
-			plusPoint := center.Add(normal.Scale(offset))
-			minusPoint := center.Sub(normal.Scale(offset))
-			var plus, minus bool
-			if sourceA {
-				// The source triangle itself defines A exactly on either side;
-				// asking a ray collider to rediscover this near a coplanar seam is
-				// less reliable, especially for very thin results.
-				var err error
-				plus, err = evalMeshBoolean(kind, false, solidB.Contains(plusPoint))
-				if err != nil {
-					return nil, err
+			center2d = center2d.Scale(1 / float64(len(piece)))
+			center := lift(center2d)
+			var coplanarNormal *model3d.Coord3D
+			for _, candidate := range relation.nearby {
+				candidateNormal := candidate.Normal()
+				if math.Abs(normal.Dot(candidateNormal)) < 1-1e-12 ||
+					math.Abs(normal.Dot(candidate[0].Sub(tri[0]))) > tol {
+					continue
 				}
-				minus, err = evalMeshBoolean(kind, true, solidB.Contains(minusPoint))
-				if err != nil {
-					return nil, err
+				projectedCandidate := []model2d.Coord{
+					project(candidate[0]), project(candidate[1]), project(candidate[2]),
 				}
-			} else {
-				var err error
-				plus, err = evalMeshBoolean(kind, solidA.Contains(plusPoint), false)
-				if err != nil {
-					return nil, err
-				}
-				minus, err = evalMeshBoolean(kind, solidA.Contains(minusPoint), true)
-				if err != nil {
-					return nil, err
+				if pointInConvexPolygon2D(center2d, projectedCandidate, tol) {
+					coplanarNormal = &candidateNormal
+					break
 				}
 			}
-			if plus == minus {
+			if coplanarNormal != nil {
+				plus, minus, err := evalCoplanarSourceSides(kind, sourceA,
+					normal.Dot(*coplanarNormal) >= 0)
+				if err != nil {
+					return nil, err
+				}
+				if plus == minus {
+					continue
+				}
+				poly := newPolygon(vertices)
+				if poly == nil {
+					continue
+				}
+				if plus && !minus {
+					poly.flip()
+				}
+				poly.coplanar = true
+				result = append(result, poly)
+				if err := checkComplexity("surface fragments", len(result), options.MaxTotalFragments); err != nil {
+					return nil, err
+				}
+				continue
+			}
+			var insideOther bool
+			var err error
+			if sourceA {
+				insideOther, err = classifierB.contains(center)
+			} else {
+				insideOther, err = classifierA.contains(center)
+			}
+			if err != nil {
+				return nil, err
+			}
+			keep, flip, err := selectSourceSurface(kind, sourceA, insideOther)
+			if err != nil {
+				return nil, err
+			}
+			if !keep {
 				continue
 			}
 			poly := newPolygon(vertices)
 			if poly == nil {
 				continue
 			}
-			// Surface normals point from result interior to result exterior.
-			if plus && !minus {
+			if flip {
 				poly.flip()
 			}
 			result = append(result, poly)
@@ -423,6 +535,339 @@ func splitAndClassifyMesh(options Options3D, triangles []*model3d.Triangle, othe
 		}
 	}
 	return result, nil
+}
+
+type indexedTriangle2D [3]int
+
+func constrainedTriangleFaces(triangle []model2d.Coord, cuts [][2]model2d.Coord,
+	tol float64) ([][]model2d.Coord, error) {
+	points := append([]model2d.Coord(nil), triangle...)
+	pointIndices := map[model2d.Coord]int{}
+	for i, point := range points {
+		pointIndices[point] = i
+	}
+	addPoint := func(point model2d.Coord) int {
+		if index, ok := pointIndices[point]; ok {
+			return index
+		}
+		index := len(points)
+		points = append(points, point)
+		pointIndices[point] = index
+		return index
+	}
+	type constraint2D struct{ a, b int }
+	constraints := []constraint2D{{0, 1}, {1, 2}, {2, 0}}
+	for _, cut := range cuts {
+		if cut[0].Dist(cut[1]) > tol {
+			constraints = append(constraints, constraint2D{addPoint(cut[0]), addPoint(cut[1])})
+		}
+	}
+
+	// Split every constraint at all input nodes on its interior. This gives the
+	// edge-flip stage a proper PSLG with no vertex lying inside a constraint.
+	var atomic []constraint2D
+	for _, constraint := range constraints {
+		start, end := points[constraint.a], points[constraint.b]
+		delta := end.Sub(start)
+		lengthSquared := delta.NormSquared()
+		if lengthSquared == 0 {
+			continue
+		}
+		type parameterizedPoint struct {
+			index     int
+			parameter float64
+		}
+		onSegment := []parameterizedPoint{{constraint.a, 0}, {constraint.b, 1}}
+		for index, point := range points {
+			if index == constraint.a || index == constraint.b {
+				continue
+			}
+			parameter := point.Sub(start).Dot(delta) / lengthSquared
+			if parameter > 0 && parameter < 1 &&
+				start.Add(delta.Scale(parameter)).Dist(point) <= tol*128 {
+				onSegment = append(onSegment, parameterizedPoint{index, parameter})
+			}
+		}
+		sort.Slice(onSegment, func(i, j int) bool {
+			if onSegment[i].parameter != onSegment[j].parameter {
+				return onSegment[i].parameter < onSegment[j].parameter
+			}
+			return onSegment[i].index < onSegment[j].index
+		})
+		for i := 0; i+1 < len(onSegment); i++ {
+			if onSegment[i].index != onSegment[i+1].index {
+				atomic = append(atomic, constraint2D{onSegment[i].index, onSegment[i+1].index})
+			}
+		}
+	}
+
+	triangles := []indexedTriangle2D{orientedTriangle2D(indexedTriangle2D{0, 1, 2}, points)}
+	for pointIndex := 3; pointIndex < len(points); pointIndex++ {
+		point := points[pointIndex]
+		type edgeKey struct{ a, b int }
+		edgeTriangles := map[edgeKey][]int{}
+		for triangleIndex, tri := range triangles {
+			for edge := 0; edge < 3; edge++ {
+				a, b := tri[edge], tri[(edge+1)%3]
+				if a > b {
+					a, b = b, a
+				}
+				edgeTriangles[edgeKey{a, b}] = append(edgeTriangles[edgeKey{a, b}], triangleIndex)
+			}
+		}
+		splitEdge := edgeKey{-1, -1}
+		bestDistance := math.Inf(1)
+		for edge := range edgeTriangles {
+			start, end := points[edge.a], points[edge.b]
+			delta := end.Sub(start)
+			lengthSquared := delta.NormSquared()
+			if lengthSquared == 0 {
+				continue
+			}
+			parameter := point.Sub(start).Dot(delta) / lengthSquared
+			if parameter <= 0 || parameter >= 1 {
+				continue
+			}
+			distance := start.Add(delta.Scale(parameter)).Dist(point)
+			if distance <= tol*128 && distance < bestDistance {
+				splitEdge, bestDistance = edge, distance
+			}
+		}
+		if splitEdge.a >= 0 {
+			incidentSet := map[int]bool{}
+			for _, index := range edgeTriangles[splitEdge] {
+				incidentSet[index] = true
+			}
+			var next []indexedTriangle2D
+			for index, tri := range triangles {
+				if !incidentSet[index] {
+					next = append(next, tri)
+					continue
+				}
+				other := triangleOtherVertex2D(tri, splitEdge.a, splitEdge.b)
+				next = appendIndexedTriangle2D(next,
+					indexedTriangle2D{splitEdge.a, pointIndex, other}, points, tol)
+				next = appendIndexedTriangle2D(next,
+					indexedTriangle2D{pointIndex, splitEdge.b, other}, points, tol)
+			}
+			triangles = next
+			continue
+		}
+		containing := -1
+		for index, tri := range triangles {
+			if pointInIndexedTriangle2D(point, tri, points, tol) {
+				containing = index
+				break
+			}
+		}
+		if containing < 0 {
+			return nil, &TopologyError{Problem: "intersection node outside source triangle"}
+		}
+		old := triangles[containing]
+		triangles = append(triangles[:containing], triangles[containing+1:]...)
+		for edge := 0; edge < 3; edge++ {
+			triangles = appendIndexedTriangle2D(triangles,
+				indexedTriangle2D{old[edge], old[(edge+1)%3], pointIndex}, points, tol)
+		}
+	}
+
+	protected := map[[2]int]bool{}
+	for _, constraint := range atomic {
+		target := orderedEdge2D(constraint.a, constraint.b)
+		inserted := false
+		for attempts := 0; attempts <= 3*len(triangles)+1; attempts++ {
+			edgeTriangles := indexedTriangleEdges2D(triangles)
+			if _, ok := edgeTriangles[target]; ok {
+				protected[target] = true
+				inserted = true
+				break
+			}
+			var crossings [][2]int
+			for edge, incident := range edgeTriangles {
+				if len(incident) != 2 || protected[edge] {
+					continue
+				}
+				if segmentsProperlyIntersect2D(points[target[0]], points[target[1]],
+					points[edge[0]], points[edge[1]], tol) {
+					crossings = append(crossings, edge)
+				}
+			}
+			sort.Slice(crossings, func(i, j int) bool {
+				if crossings[i][0] != crossings[j][0] {
+					return crossings[i][0] < crossings[j][0]
+				}
+				return crossings[i][1] < crossings[j][1]
+			})
+			flipped := false
+			for _, crossing := range crossings {
+				incident := edgeTriangles[crossing]
+				first, second := triangles[incident[0]], triangles[incident[1]]
+				oppositeA := triangleOtherVertex2D(first, crossing[0], crossing[1])
+				oppositeB := triangleOtherVertex2D(second, crossing[0], crossing[1])
+				if !segmentsProperlyIntersect2D(points[crossing[0]], points[crossing[1]],
+					points[oppositeA], points[oppositeB], tol) {
+					continue
+				}
+				if segmentsProperlyIntersect2D(points[target[0]], points[target[1]],
+					points[oppositeA], points[oppositeB], tol) {
+					continue
+				}
+				replacementA := orientedTriangle2D(
+					indexedTriangle2D{oppositeA, oppositeB, crossing[0]}, points)
+				replacementB := orientedTriangle2D(
+					indexedTriangle2D{oppositeB, oppositeA, crossing[1]}, points)
+				triangles[incident[0]], triangles[incident[1]] = replacementA, replacementB
+				flipped = true
+				break
+			}
+			if !flipped {
+				break
+			}
+		}
+		if !inserted {
+			return nil, &TopologyError{Problem: "could not enforce triangle intersection edge"}
+		}
+	}
+
+	result := make([][]model2d.Coord, 0, len(triangles))
+	for _, triangle := range triangles {
+		result = append(result, []model2d.Coord{
+			points[triangle[0]], points[triangle[1]], points[triangle[2]],
+		})
+	}
+	return result, nil
+}
+
+func orderedEdge2D(a, b int) [2]int {
+	if a > b {
+		a, b = b, a
+	}
+	return [2]int{a, b}
+}
+
+func indexedTriangleEdges2D(triangles []indexedTriangle2D) map[[2]int][]int {
+	result := map[[2]int][]int{}
+	for triangleIndex, triangle := range triangles {
+		for edge := 0; edge < 3; edge++ {
+			key := orderedEdge2D(triangle[edge], triangle[(edge+1)%3])
+			result[key] = append(result[key], triangleIndex)
+		}
+	}
+	return result
+}
+
+func orientedTriangle2D(triangle indexedTriangle2D, points []model2d.Coord) indexedTriangle2D {
+	if cross2D(points[triangle[1]].Sub(points[triangle[0]]),
+		points[triangle[2]].Sub(points[triangle[0]])) < 0 {
+		triangle[1], triangle[2] = triangle[2], triangle[1]
+	}
+	return triangle
+}
+
+func appendIndexedTriangle2D(triangles []indexedTriangle2D, triangle indexedTriangle2D,
+	points []model2d.Coord, tol float64) []indexedTriangle2D {
+	triangle = orientedTriangle2D(triangle, points)
+	areaTwice := cross2D(points[triangle[1]].Sub(points[triangle[0]]),
+		points[triangle[2]].Sub(points[triangle[0]]))
+	if areaTwice > 2*tol*tol {
+		return append(triangles, triangle)
+	}
+	return triangles
+}
+
+func triangleOtherVertex2D(triangle indexedTriangle2D, a, b int) int {
+	for _, vertex := range triangle {
+		if vertex != a && vertex != b {
+			return vertex
+		}
+	}
+	return -1
+}
+
+func pointInIndexedTriangle2D(point model2d.Coord, triangle indexedTriangle2D,
+	points []model2d.Coord, tol float64) bool {
+	for edge := 0; edge < 3; edge++ {
+		start, end := points[triangle[edge]], points[triangle[(edge+1)%3]]
+		direction := end.Sub(start)
+		if cross2D(direction, point.Sub(start)) < -tol*math.Max(direction.Norm(), tol) {
+			return false
+		}
+	}
+	return true
+}
+
+func segmentsProperlyIntersect2D(a, b, c, d model2d.Coord, tol float64) bool {
+	ab, cd := b.Sub(a), d.Sub(c)
+	toleranceAB := tol * math.Max(ab.Norm(), tol)
+	toleranceCD := tol * math.Max(cd.Norm(), tol)
+	sideC, sideD := cross2D(ab, c.Sub(a)), cross2D(ab, d.Sub(a))
+	sideA, sideB := cross2D(cd, a.Sub(c)), cross2D(cd, b.Sub(c))
+	return ((sideC > toleranceAB && sideD < -toleranceAB) ||
+		(sideC < -toleranceAB && sideD > toleranceAB)) &&
+		((sideA > toleranceCD && sideB < -toleranceCD) ||
+			(sideA < -toleranceCD && sideB > toleranceCD))
+}
+
+func pointInConvexPolygon2D(point model2d.Coord, polygon []model2d.Coord, tol float64) bool {
+	sign := 0
+	for i, start := range polygon {
+		edge := polygon[(i+1)%len(polygon)].Sub(start)
+		side := cross2D(edge, point.Sub(start))
+		determinantTolerance := tol * math.Max(edge.Norm(), tol)
+		if math.Abs(side) <= determinantTolerance {
+			continue
+		}
+		newSign := 1
+		if side < 0 {
+			newSign = -1
+		}
+		if sign != 0 && sign != newSign {
+			return false
+		}
+		sign = newSign
+	}
+	return true
+}
+
+func evalCoplanarSourceSides(kind meshBooleanKind, sourceA, sameNormal bool) (bool, bool, error) {
+	var plusA, minusA, plusB, minusB bool
+	if sourceA {
+		minusA = true
+		if sameNormal {
+			minusB = true
+		} else {
+			plusB = true
+		}
+	} else {
+		minusB = true
+		if sameNormal {
+			minusA = true
+		} else {
+			plusA = true
+		}
+	}
+	plus, err := evalMeshBoolean(kind, plusA, plusB)
+	if err != nil {
+		return false, false, err
+	}
+	minus, err := evalMeshBoolean(kind, minusA, minusB)
+	return plus, minus, err
+}
+
+func selectSourceSurface(kind meshBooleanKind, sourceA, insideOther bool) (bool, bool, error) {
+	switch kind {
+	case meshUnion:
+		return !insideOther, false, nil
+	case meshIntersection:
+		return insideOther, false, nil
+	case meshDifference:
+		if sourceA {
+			return !insideOther, false, nil
+		}
+		return insideOther, true, nil
+	default:
+		return false, false, fmt.Errorf("meshbool: unknown boolean operation %d", kind)
+	}
 }
 
 func sortedTriangles(mesh *model3d.Mesh) []*model3d.Triangle {
@@ -533,6 +978,7 @@ func evalMeshBoolean(kind meshBooleanKind, inA, inB bool) (bool, error) {
 type polygon struct {
 	vertices []model3d.Coord3D
 	plane    plane
+	coplanar bool
 }
 
 type plane struct {
@@ -599,7 +1045,39 @@ type coplanarGroup struct {
 type planeGroupKey [4]int64
 
 func polygonsMesh(options Options3D, polygons []*polygon, scale float64) (*model3d.Mesh, error) {
-	tol := math.Max(scale*1e-9, math.SmallestNonzeroFloat64*1024)
+	tol := math.Max(scale*arithmeticToleranceRelative, math.SmallestNonzeroFloat64*1024)
+	var raw []model3d.Triangle
+	var coplanar []*polygon
+	for _, polygon := range polygons {
+		if polygon.coplanar {
+			coplanar = append(coplanar, polygon)
+			continue
+		}
+		for i := 1; i+1 < len(polygon.vertices); i++ {
+			triangle := model3d.Triangle{
+				polygon.vertices[0], polygon.vertices[i], polygon.vertices[i+1],
+			}
+			if triangle.Area() > tol*tol {
+				raw = append(raw, triangle)
+			}
+		}
+		if err := checkComplexity("triangulated surface cells", len(raw),
+			options.MaxOutputTriangles); err != nil {
+			return nil, err
+		}
+	}
+	if len(coplanar) != 0 {
+		triangles, err := triangulateCoplanarPolygons(options, coplanar, tol)
+		if err != nil {
+			return nil, err
+		}
+		raw = append(raw, triangles...)
+	}
+	return finalizeTriangles(options, raw, tol)
+}
+
+func triangulateCoplanarPolygons(options Options3D, polygons []*polygon,
+	tol float64) ([]model3d.Triangle, error) {
 	var groups []*coplanarGroup
 	normalStep := 1e-10
 	wStep := tol * 4
@@ -663,8 +1141,16 @@ func polygonsMesh(options Options3D, polygons []*polygon, scale float64) (*model
 		if err != nil {
 			return nil, convertPlanarError(err)
 		}
-		if positive.NumSegments() != 0 {
-			triangles, err := liftPlanarMesh(positive, group, true)
+		positiveOnly, err := bool2d.Difference(options.PlanarOptions.internal(), positive, negative)
+		if err != nil {
+			return nil, convertPlanarError(err)
+		}
+		negativeOnly, err := bool2d.Difference(options.PlanarOptions.internal(), negative, positive)
+		if err != nil {
+			return nil, convertPlanarError(err)
+		}
+		if positiveOnly.NumSegments() != 0 {
+			triangles, err := liftPlanarMesh(positiveOnly, group, true)
 			if err != nil {
 				return nil, err
 			}
@@ -673,8 +1159,8 @@ func polygonsMesh(options Options3D, polygons []*polygon, scale float64) (*model
 				return nil, err
 			}
 		}
-		if negative.NumSegments() != 0 {
-			triangles, err := liftPlanarMesh(negative, group, false)
+		if negativeOnly.NumSegments() != 0 {
+			triangles, err := liftPlanarMesh(negativeOnly, group, false)
 			if err != nil {
 				return nil, err
 			}
@@ -684,7 +1170,7 @@ func polygonsMesh(options Options3D, polygons []*polygon, scale float64) (*model
 			}
 		}
 	}
-	return finalizeTriangles(options, raw, tol)
+	return raw, nil
 }
 
 func convertPlanarError(err error) error {
@@ -791,34 +1277,6 @@ func finalizeTriangles(options Options3D, raw []model3d.Triangle, tol float64) (
 		}
 		candidates = append(candidates, tri)
 	}
-	// Numerical boundary classification can leave a zero-neighborhood sliver:
-	// a triangle whose three edges are all exposed and which is not connected
-	// to the closed result. Such a patch cannot bound volume and retaining it
-	// would make the result non-manifold.
-	for {
-		edgeCounts := map[model3d.Segment]int{}
-		for _, tri := range candidates {
-			for i := range tri {
-				edgeCounts[model3d.NewSegment(tri[i], tri[(i+1)%3])]++
-			}
-		}
-		filtered := make([]model3d.Triangle, 0, len(candidates))
-		for _, tri := range candidates {
-			exposed := 0
-			for i := range tri {
-				if edgeCounts[model3d.NewSegment(tri[i], tri[(i+1)%3])] != 2 {
-					exposed++
-				}
-			}
-			if exposed < 2 {
-				filtered = append(filtered, tri)
-			}
-		}
-		if len(filtered) == len(candidates) {
-			break
-		}
-		candidates = filtered
-	}
 	result := model3d.NewMesh()
 	for _, tri := range candidates {
 		triCopy := tri
@@ -838,7 +1296,19 @@ func validateResultTopology(mesh *model3d.Mesh) (*model3d.Mesh, error) {
 		return mesh, nil
 	}
 	if mesh.NeedsRepair() {
-		return nil, &TopologyError{Problem: "edges do not each have two incident triangles"}
+		edgeCounts := map[model3d.Segment]int{}
+		mesh.Iterate(func(triangle *model3d.Triangle) {
+			for i := range triangle {
+				edgeCounts[model3d.NewSegment(triangle[i], triangle[(i+1)%3])]++
+			}
+		})
+		badEdges := 0
+		for _, count := range edgeCounts {
+			if count != 2 {
+				badEdges++
+			}
+		}
+		return nil, &TopologyError{Problem: "edges do not each have two incident triangles", Count: badEdges}
 	}
 	if singular := mesh.SingularVertices(); len(singular) != 0 {
 		return nil, &TopologyError{Problem: "singular vertices", Count: len(singular)}
@@ -1614,7 +2084,7 @@ func meshScale(meshes []*model3d.Mesh) float64 {
 	// a handful of ULPs even when the mesh's local extent is small. Inflate the
 	// effective scale so all callers' relative tolerances honor that floor.
 	ulp := math.Nextafter(maxAbs, math.Inf(1)) - maxAbs
-	scale = math.Max(scale, ulp*16/1e-9)
+	scale = math.Max(scale, ulp*16/arithmeticToleranceRelative)
 	return scale
 }
 
