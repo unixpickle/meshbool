@@ -143,6 +143,41 @@ func TestMarchingCubesShiftedCubeSphereUnion(t *testing.T) {
 	assertValidMesh3D(t, result)
 }
 
+func TestDifferenceNearCoplanarTangentExtrusion(t *testing.T) {
+	// This is a 12-triangle decimation of a delta=0.1 dual-contoured unit
+	// cube. Its faces are almost planar, but contain errors on the order of
+	// 1e-7. In particular, its bottom straddles the extrusion's Z=0 cap.
+	vertices := []model3d.Coord3D{
+		{X: 1.7989322182086236e-08, Y: 1.0000000272911684, Z: 1.6634052322922494e-07},
+		{X: -1.585137612667889e-07, Y: -3.0676921251141815e-07, Z: 1.0000000008863323},
+		{X: -1.543049614467355e-07, Y: 1.0000000914954403, Z: 1.0000001813827935},
+		{X: 0.999999850487341, Y: 0.9999997717239826, Z: 1.0000002782672948},
+		{X: 1.8241566398922915e-09, Y: 2.8559714585912116e-09, Z: -3.5339673175418814e-09},
+		{X: 0.999999845425978, Y: -1.870602983595055e-07, Z: 1.0000000980696397},
+		{X: 1.0000000135362375, Y: 0.9999997193224248, Z: 2.7184174006594976e-07},
+		{X: 1.0000000057638958, Y: 1.2256488561321437e-07, Z: 9.364934009533608e-08},
+	}
+	indices := [][3]int{
+		{0, 1, 2}, {1, 3, 2}, {1, 0, 4}, {5, 1, 4},
+		{3, 1, 5}, {3, 0, 2}, {6, 4, 0}, {4, 7, 5},
+		{4, 6, 7}, {0, 3, 6}, {5, 6, 3}, {6, 5, 7},
+	}
+	cube := model3d.NewMesh()
+	for _, index := range indices {
+		triangle := model3d.Triangle{vertices[index[0]], vertices[index[1]], vertices[index[2]]}
+		cube.Add(&triangle)
+	}
+	circle := model2d.MarchingSquaresSearch(&model2d.Circle{Radius: 0.2}, 0.01, 8)
+	extrusion := model3d.ProfileMesh(circle, 0, 10)
+	options := DefaultOptions3D()
+	options.MaxFragmentsPerTriangle = 200_000
+	result, err := Difference3D(options, cube, extrusion)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertValidMesh3D(t, result)
+}
+
 func TestConstrainedTriangleFacesCloseIntersections(t *testing.T) {
 	// These are projected intersections from float32 GPU-generated cube and
 	// sphere meshes. Several nodes are extremely close, but remain distinct at
@@ -177,6 +212,46 @@ func TestConstrainedTriangleFacesCloseIntersections(t *testing.T) {
 		}
 		if !found {
 			t.Fatalf("constraint %v was not present in triangulation", constraint)
+		}
+	}
+}
+
+func TestConstrainedTriangleFacesNearEndpointCrossing(t *testing.T) {
+	// These projected cuts come from a nearly planar dual-contoured cube
+	// intersecting a thin vertical extrusion facet. The lower constraint
+	// crosses an existing triangulation edge less than tol from its endpoint,
+	// but it is still a topologically proper crossing.
+	const tol = 1.0000000003533967e-11
+	triangle := []model2d.Coord{
+		model2d.XY(0, 0),
+		model2d.XY(0, 2.7621358640152896e-05),
+		model2d.XY(-10, 0),
+	}
+	cuts := [][2]model2d.Coord{
+		{
+			model2d.XY(-1.0000000413899168, 2.4859222661817214e-05),
+			model2d.XY(-1.000000041388447, 0),
+		},
+		{
+			model2d.XY(-2.9388234359600975e-08, 2.7621358558979117e-05),
+			model2d.XY(-2.938753699890589e-08, 0),
+		},
+	}
+	faces, err := constrainedTriangleFaces(triangle, cuts, tol)
+	if err != nil {
+		t.Fatal(err)
+	}
+	edges := map[[2]model2d.Coord]bool{}
+	for _, face := range faces {
+		for i, point := range face {
+			next := face[(i+1)%len(face)]
+			edges[[2]model2d.Coord{point, next}] = true
+			edges[[2]model2d.Coord{next, point}] = true
+		}
+	}
+	for _, cut := range cuts {
+		if !edges[[2]model2d.Coord{cut[0], cut[1]}] {
+			t.Fatalf("constraint %v was not present in triangulation", cut)
 		}
 	}
 }

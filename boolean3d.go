@@ -1,8 +1,10 @@
 package meshbool
 
 import (
+	"errors"
 	"fmt"
 	"math"
+	"math/big"
 	"sort"
 
 	"github.com/unixpickle/meshbool/internal/bool2d"
@@ -12,6 +14,7 @@ import (
 
 const (
 	arithmeticToleranceRelative      = 1e-12
+	fallbackToleranceRelative        = 5e-15
 	defaultMaxInputTriangles         = 200_000
 	defaultMaxFragmentsPerTriangle   = 4_096
 	defaultMaxTotalFragments         = 200_000
@@ -264,6 +267,29 @@ func booleanMeshPair(options Options3D, a, b *model3d.Mesh, kind meshBooleanKind
 }
 
 func booleanMeshPairLocal(options Options3D, a, b *model3d.Mesh, kind meshBooleanKind) (*model3d.Mesh, error) {
+	// The normal tolerance absorbs projection roundoff and is the stable choice
+	// for ordinary meshes. In a near-tangent arrangement it can instead erase a
+	// real microscopic surface cell. Retry topology failures with a tolerance
+	// close to machine precision so that cell remains explicit.
+	var lastErr error
+	for _, relativeTolerance := range []float64{
+		arithmeticToleranceRelative, fallbackToleranceRelative,
+	} {
+		result, err := booleanMeshPairLocalTolerance(options, a, b, kind, relativeTolerance)
+		if err == nil {
+			return result, nil
+		}
+		lastErr = err
+		var topologyErr *TopologyError
+		if !errors.As(err, &topologyErr) {
+			return nil, err
+		}
+	}
+	return nil, lastErr
+}
+
+func booleanMeshPairLocalTolerance(options Options3D, a, b *model3d.Mesh,
+	kind meshBooleanKind, relativeTolerance float64) (*model3d.Mesh, error) {
 	if err := checkComplexity("triangles in one input mesh", a.NumTriangles(), options.MaxInputTriangles); err != nil {
 		return nil, err
 	}
@@ -275,7 +301,7 @@ func booleanMeshPairLocal(options Options3D, a, b *model3d.Mesh, kind meshBoolea
 	classifierA := newExactMeshClassifier(trianglesA, indexA)
 	classifierB := newExactMeshClassifier(trianglesB, indexB)
 	scale := meshScale([]*model3d.Mesh{a, b})
-	tol := math.Max(scale*arithmeticToleranceRelative, math.SmallestNonzeroFloat64*1024)
+	tol := math.Max(scale*relativeTolerance, math.SmallestNonzeroFloat64*1024)
 	candidatePairs := 0
 	relationsA, relationsB, err := buildTriangleRelations(options, trianglesA, indexB, tol, &candidatePairs)
 	if err != nil {
@@ -300,7 +326,7 @@ func booleanMeshPairLocal(options Options3D, a, b *model3d.Mesh, kind meshBoolea
 	if err := checkComplexity("surface fragments", len(fragments), options.MaxTotalFragments); err != nil {
 		return nil, err
 	}
-	return polygonsMesh(options, fragments, scale)
+	return polygonsMesh(options, fragments, tol)
 }
 
 type triangleRelation struct {
@@ -689,14 +715,31 @@ func constrainedTriangleFaces(triangle []model2d.Coord, cuts [][2]model2d.Coord,
 				inserted = true
 				break
 			}
+			intersectionFn := segmentsProperlyIntersect2D
 			var crossings [][2]int
 			for edge, incident := range edgeTriangles {
 				if len(incident) != 2 || protected[edge] {
 					continue
 				}
-				if segmentsProperlyIntersect2D(points[target[0]], points[target[1]],
+				if intersectionFn(points[target[0]], points[target[1]],
 					points[edge[0]], points[edge[1]], tol) {
 					crossings = append(crossings, edge)
+				}
+			}
+			if len(crossings) == 0 {
+				// A valid constraint can cross an existing edge arbitrarily close
+				// to one of its endpoints. The tolerance-aware test deliberately
+				// ignores such crossings, so retry with exact signs before falling
+				// back to cavity reconstruction.
+				intersectionFn = segmentsProperlyIntersect2DExact
+				for edge, incident := range edgeTriangles {
+					if len(incident) != 2 || protected[edge] {
+						continue
+					}
+					if intersectionFn(points[target[0]], points[target[1]],
+						points[edge[0]], points[edge[1]], tol) {
+						crossings = append(crossings, edge)
+					}
 				}
 			}
 			sort.Slice(crossings, func(i, j int) bool {
@@ -711,11 +754,11 @@ func constrainedTriangleFaces(triangle []model2d.Coord, cuts [][2]model2d.Coord,
 				first, second := triangles[incident[0]], triangles[incident[1]]
 				oppositeA := triangleOtherVertex2D(first, crossing[0], crossing[1])
 				oppositeB := triangleOtherVertex2D(second, crossing[0], crossing[1])
-				if !segmentsProperlyIntersect2D(points[crossing[0]], points[crossing[1]],
+				if !intersectionFn(points[crossing[0]], points[crossing[1]],
 					points[oppositeA], points[oppositeB], tol) {
 					continue
 				}
-				if segmentsProperlyIntersect2D(points[target[0]], points[target[1]],
+				if intersectionFn(points[target[0]], points[target[1]],
 					points[oppositeA], points[oppositeB], tol) {
 					continue
 				}
@@ -755,16 +798,24 @@ func insertConstraintCavity2D(triangles []indexedTriangle2D, target [2]int,
 ) ([]indexedTriangle2D, error) {
 	edges := indexedTriangleEdges2D(triangles)
 	removed := map[int]bool{}
-	for edge, incident := range edges {
-		if !segmentsProperlyIntersect2D(points[target[0]], points[target[1]],
-			points[edge[0]], points[edge[1]], tol) {
-			continue
+	for _, intersectionFn := range []func(model2d.Coord, model2d.Coord,
+		model2d.Coord, model2d.Coord, float64) bool{
+		segmentsProperlyIntersect2D, segmentsProperlyIntersect2DExact,
+	} {
+		for edge, incident := range edges {
+			if !intersectionFn(points[target[0]], points[target[1]],
+				points[edge[0]], points[edge[1]], tol) {
+				continue
+			}
+			if protected[edge] {
+				return nil, &TopologyError{Problem: "intersecting triangle constraints"}
+			}
+			for _, triangleIndex := range incident {
+				removed[triangleIndex] = true
+			}
 		}
-		if protected[edge] {
-			return nil, &TopologyError{Problem: "intersecting triangle constraints"}
-		}
-		for _, triangleIndex := range incident {
-			removed[triangleIndex] = true
+		if len(removed) != 0 {
+			break
 		}
 	}
 	if len(removed) == 0 {
@@ -970,6 +1021,25 @@ func segmentsProperlyIntersect2D(a, b, c, d model2d.Coord, tol float64) bool {
 		(sideC < -toleranceAB && sideD > toleranceAB)) &&
 		((sideA > toleranceCD && sideB < -toleranceCD) ||
 			(sideA < -toleranceCD && sideB > toleranceCD))
+}
+
+func segmentsProperlyIntersect2DExact(a, b, c, d model2d.Coord, _ float64) bool {
+	sideC, sideD := exactOrient2DSign(a, b, c), exactOrient2DSign(a, b, d)
+	sideA, sideB := exactOrient2DSign(c, d, a), exactOrient2DSign(c, d, b)
+	return sideC != 0 && sideD != 0 && sideC != sideD &&
+		sideA != 0 && sideB != 0 && sideA != sideB
+}
+
+func exactOrient2DSign(a, b, c model2d.Coord) int {
+	ax, ay := new(big.Rat).SetFloat64(a.X), new(big.Rat).SetFloat64(a.Y)
+	abx := new(big.Rat).Sub(new(big.Rat).SetFloat64(b.X), ax)
+	aby := new(big.Rat).Sub(new(big.Rat).SetFloat64(b.Y), ay)
+	acx := new(big.Rat).Sub(new(big.Rat).SetFloat64(c.X), ax)
+	acy := new(big.Rat).Sub(new(big.Rat).SetFloat64(c.Y), ay)
+	return new(big.Rat).Sub(
+		new(big.Rat).Mul(abx, acy),
+		new(big.Rat).Mul(aby, acx),
+	).Sign()
 }
 
 func pointInConvexPolygon2D(point model2d.Coord, polygon []model2d.Coord, tol float64) bool {
@@ -1213,8 +1283,7 @@ type coplanarGroup struct {
 
 type planeGroupKey [4]int64
 
-func polygonsMesh(options Options3D, polygons []*polygon, scale float64) (*model3d.Mesh, error) {
-	tol := math.Max(scale*arithmeticToleranceRelative, math.SmallestNonzeroFloat64*1024)
+func polygonsMesh(options Options3D, polygons []*polygon, tol float64) (*model3d.Mesh, error) {
 	var raw []model3d.Triangle
 	var coplanar []*polygon
 	for _, polygon := range polygons {
