@@ -312,6 +312,33 @@ func TestConstrainedTriangleFacesNearEndpointCrossing(t *testing.T) {
 	}
 }
 
+func TestConstrainedTriangleFacesPrefersExactEdge(t *testing.T) {
+	// The shared endpoint is tolerance-close to both the boundary and a skinny
+	// radial edge. It must split the boundary edge that contains it exactly;
+	// choosing the slightly closer radial edge can orphan a later constraint.
+	const scale = 1.6777216e7
+	const tol = 1.6777216e-8
+	triangle := []model2d.Coord{{}, model2d.X(scale), model2d.Y(scale)}
+	center := model2d.XY(3.712003942242087e6, 2.909821896061641e-8)
+	cuts := [][2]model2d.Coord{
+		{center, model2d.X(1.417254584168837e7)},
+		{center, model2d.X(72790.77755365628)},
+		{center, model2d.X(289660.4114110056)},
+	}
+	faces, err := constrainedTriangleFaces(triangle, cuts, tol)
+	if err != nil {
+		t.Fatal(err)
+	}
+	area := 0.0
+	for _, face := range faces {
+		area += math.Abs(cross2D(face[1].Sub(face[0]), face[2].Sub(face[0]))) / 2
+	}
+	want := scale * scale / 2
+	if math.Abs(area-want) > want*1e-12 {
+		t.Fatalf("triangulated area: got %g want %g", area, want)
+	}
+}
+
 func TestInsertConstraintCavity2DFrogRegression(t *testing.T) {
 	// This is the small constraint cavity that previously failed while
 	// subtracting a marching-cubes cube from frog_high.stl. No crossed edge can
@@ -443,6 +470,41 @@ func TestInsertConstraintCavity2DPreservesInteriorVertex(t *testing.T) {
 		}
 	}
 	t.Fatal("cavity reconstruction discarded an interior vertex")
+}
+
+func TestConformConstraintEndpointOnNearEdge(t *testing.T) {
+	// A projected intersection endpoint is only 2.7e-14 from an existing edge.
+	// Leaving both the sliver edge and endpoint in place makes the requested
+	// constraint overlap the triangulation instead of crossing it.
+	points := []model2d.Coord{
+		{},
+		model2d.XY(-64.78883108282187, -952.9589080738864),
+		model2d.XY(856.330706952857, -400.36548265856635),
+		model2d.XY(-64.78882989672773, -952.9588906279935),
+		model2d.XY(-64.78882461717834, -952.9588909149562),
+		model2d.XY(-43.76465512052545, -643.7207966072424),
+		model2d.XY(-35.11489526853775, -516.4942329856557),
+		model2d.XY(856.33070367488, -400.36548462507386),
+		model2d.XY(856.3307040923356, -400.3654813211695),
+		model2d.XY(355.8498336531431, -700.6114645441739),
+		model2d.XY(150.65883842638954, -70.4384393478034),
+	}
+	triangles := []indexedTriangle2D{
+		{8, 7, 2}, {3, 1, 4}, {1, 7, 9}, {7, 4, 1}, {7, 8, 3}, {7, 3, 4},
+		{0, 5, 6}, {6, 5, 3}, {0, 6, 10}, {10, 6, 8}, {8, 6, 3},
+	}
+	protected := map[[2]int]bool{}
+	for _, edge := range [][2]int{{0, 5}, {0, 10}, {1, 3}, {1, 9}, {2, 7}, {2, 8}, {3, 4}, {3, 5}, {5, 6}, {7, 8}, {7, 9}, {8, 10}} {
+		protected[edge] = true
+	}
+	target := orderedEdge2D(4, 9)
+	for _, endpoint := range target {
+		triangles = conformTriangulationPoint2D(triangles, endpoint, protected, points, 9.759077375500976e-12)
+		if _, ok := indexedTriangleEdges2D(triangles)[target]; ok {
+			return
+		}
+	}
+	t.Fatal("conforming endpoints did not produce the constraint edge")
 }
 
 func TestRandomDualContourBooleans(t *testing.T) {
@@ -723,6 +785,64 @@ func TestThinOverlap3D(t *testing.T) {
 	}
 }
 
+func TestDifferenceNearCoincidentIcospheres(t *testing.T) {
+	base := model3d.NewMeshIcosphere(model3d.Coord3D{}, 1, 1).Scale(0.0625)
+	shift := model3d.XYZ(-1.5702306801199588e-11, -2.391969238598219e-10, 5.772029705200064e-10)
+	result, err := Difference3D(DefaultOptions3D(), base, base.Translate(shift))
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertValidMesh3D(t, result)
+}
+
+func TestNearCoincidentToleranceRetry(t *testing.T) {
+	base := randomRaggedIcosphere(rand.New(rand.NewSource(10)), model3d.Coord3D{}).Scale(8)
+	shift := model3d.XYZ(3.708472692086168e-12, -4.855797323180932e-12, 5.1641516871834864e-12)
+	other := base.Translate(shift)
+	options := DefaultOptions3D()
+	if _, err := booleanMeshPairLocalTolerance(options, base, other,
+		meshIntersection, arithmeticToleranceRelative, false); err == nil {
+		t.Fatal("ordinary tolerance unexpectedly succeeded; regression no longer exercises retry")
+	}
+	result, err := Intersection3D(options, base, other)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertValidMesh3D(t, result)
+}
+
+func TestReduceTriangleIncidenceDefects(t *testing.T) {
+	base := model3d.NewMeshRect(model3d.Coord3D{}, model3d.Ones(1))
+	withFlap := base.DeepCopy()
+	first := sortedTriangles(base)[0]
+	flap := model3d.Triangle{
+		first[0], first[1], first[0].Mid(first[1]).Add(model3d.XYZ(0.17, 0.23, 0.31)),
+	}
+	withFlap.Add(&flap)
+	if !withFlap.NeedsRepair() {
+		t.Fatal("test mesh unexpectedly remained manifold after adding flap")
+	}
+	result := reduceTriangleIncidenceDefects(withFlap)
+	assertValidMesh3D(t, result)
+	if result.NumTriangles() != base.NumTriangles() {
+		t.Fatalf("triangle count: got %d want %d", result.NumTriangles(), base.NumTriangles())
+	}
+
+	// A hole cannot be repaired by deleting more surface. The defect objective
+	// must therefore leave this input alone instead of cascading to an empty
+	// mesh that merely happens to be manifold.
+	missingFace := model3d.NewMesh()
+	baseTriangles := sortedTriangles(base)
+	for _, triangle := range baseTriangles[1:] {
+		missingFace.Add(triangle)
+	}
+	result = reduceTriangleIncidenceDefects(missingFace)
+	if result.NumTriangles() != missingFace.NumTriangles() || !result.NeedsRepair() {
+		t.Fatalf("hole was destructively changed: %d triangles, needs_repair=%v",
+			result.NumTriangles(), result.NeedsRepair())
+	}
+}
+
 func TestBooleanIdentitiesIcospheres(t *testing.T) {
 	rng := rand.New(rand.NewSource(123))
 	trials := 2
@@ -843,6 +963,28 @@ func TestEmptyInputs3D(t *testing.T) {
 	assertValidMesh3D(t, result)
 	if math.Abs(result.Volume()-1) > 1e-8 {
 		t.Fatalf("identity difference volume: %g", result.Volume())
+	}
+}
+
+func TestNonFiniteInput3D(t *testing.T) {
+	for name, value := range map[string]float64{
+		"nan": math.NaN(), "positive_inf": math.Inf(1), "negative_inf": math.Inf(-1),
+	} {
+		t.Run(name, func(t *testing.T) {
+			input := model3d.NewMesh()
+			triangle := model3d.Triangle{{}, model3d.X(value), model3d.Y(1)}
+			input.Add(&triangle)
+			for operation, call := range map[string]func() (*model3d.Mesh, error){
+				"union":        func() (*model3d.Mesh, error) { return Union3D(DefaultOptions3D(), input) },
+				"intersection": func() (*model3d.Mesh, error) { return Intersection3D(DefaultOptions3D(), input) },
+				"difference":   func() (*model3d.Mesh, error) { return Difference3D(DefaultOptions3D(), input) },
+			} {
+				result, err := call()
+				if result != nil || err == nil {
+					t.Fatalf("%s: got result=%v err=%v", operation, result, err)
+				}
+			}
+		})
 	}
 }
 

@@ -219,6 +219,18 @@ func checkInputMeshes(options Options3D, meshes []*model3d.Mesh) error {
 		if err := checkComplexity("triangles in one input mesh", mesh.NumTriangles(), options.MaxInputTriangles); err != nil {
 			return err
 		}
+		var nonFinite bool
+		mesh.Iterate(func(triangle *model3d.Triangle) {
+			for _, point := range triangle {
+				if math.IsNaN(point.X) || math.IsNaN(point.Y) || math.IsNaN(point.Z) ||
+					math.IsInf(point.X, 0) || math.IsInf(point.Y, 0) || math.IsInf(point.Z, 0) {
+					nonFinite = true
+				}
+			}
+		})
+		if nonFinite {
+			return fmt.Errorf("meshbool: input mesh contains a non-finite coordinate")
+		}
 	}
 	return nil
 }
@@ -269,8 +281,8 @@ func booleanMeshPair(options Options3D, a, b *model3d.Mesh, kind meshBooleanKind
 func booleanMeshPairLocal(options Options3D, a, b *model3d.Mesh, kind meshBooleanKind) (*model3d.Mesh, error) {
 	// The normal tolerance absorbs projection roundoff and is the stable choice
 	// for ordinary meshes. In a near-tangent arrangement it can instead erase a
-	// real microscopic surface cell. Retry topology failures with a tolerance
-	// close to machine precision so that cell remains explicit, and use a
+	// real microscopic surface cell. Retry topology failures at a much finer
+	// tolerance so that the cell remains explicit. The retry also uses a
 	// dominant-axis containment predicate that stays stable on skinny cells.
 	var lastErr error
 	for _, attempt := range []struct {
@@ -497,7 +509,10 @@ func splitAndClassifyMesh(options Options3D, triangles []*model3d.Triangle,
 				vertices[i] = lift(point)
 			}
 			center2d = center2d.Scale(1 / float64(len(piece)))
-			center := lift(center2d)
+			// Unlike reconstructed vertices, the classification sample must stay
+			// strictly in the cell interior. Snapping a tiny cell's centroid to a
+			// nearby intersection node evaluates the boundary rather than the cell.
+			center := origin.Add(u.Scale(center2d.X)).Add(v.Scale(center2d.Y))
 			var coplanarNormal *model3d.Coord3D
 			for _, candidate := range relation.nearby {
 				candidateNormal := candidate.Normal()
@@ -653,6 +668,14 @@ func constrainedTriangleFaces(triangle []model2d.Coord, cuts [][2]model2d.Coord,
 	protected := map[[2]int]bool{}
 	for _, constraint := range atomic {
 		target := orderedEdge2D(constraint.a, constraint.b)
+		if _, ok := indexedTriangleEdges2D(triangles)[target]; !ok {
+			for _, endpoint := range [2]int{constraint.a, constraint.b} {
+				triangles = conformTriangulationPoint2D(triangles, endpoint, protected, points, tol)
+				if _, ok := indexedTriangleEdges2D(triangles)[target]; ok {
+					break
+				}
+			}
+		}
 		inserted := false
 		for attempts := 0; attempts <= 3*len(triangles)+1; attempts++ {
 			edgeTriangles := indexedTriangleEdges2D(triangles)
@@ -744,6 +767,7 @@ func insertTriangulationPoint2D(triangles []indexedTriangle2D, pointIndex int,
 	edgeTriangles := indexedTriangleEdges2D(triangles)
 	splitEdge := [2]int{-1, -1}
 	bestDistance := math.Inf(1)
+	foundExact := false
 	for edge := range edgeTriangles {
 		start, end := points[edge[0]], points[edge[1]]
 		delta := end.Sub(start)
@@ -755,8 +779,15 @@ func insertTriangulationPoint2D(triangles []indexedTriangle2D, pointIndex int,
 		if parameter <= 0 || parameter >= 1 {
 			continue
 		}
-		distance := start.Add(delta.Scale(parameter)).Dist(point)
-		if distance <= tol && distance < bestDistance {
+		exact := exactOrient2DSign(start, end, point) == 0
+		distance := math.Abs(cross2D(delta, point.Sub(start))) / math.Sqrt(lengthSquared)
+		if exact && (!foundExact || edge[0] < splitEdge[0] ||
+			edge[0] == splitEdge[0] && edge[1] < splitEdge[1]) {
+			splitEdge, bestDistance = edge, distance
+			foundExact = true
+		} else if !foundExact && distance <= tol &&
+			(distance < bestDistance || distance == bestDistance &&
+				(edge[0] < splitEdge[0] || edge[0] == splitEdge[0] && edge[1] < splitEdge[1])) {
 			splitEdge, bestDistance = edge, distance
 		}
 	}
@@ -797,6 +828,74 @@ func insertTriangulationPoint2D(triangles []indexedTriangle2D, pointIndex int,
 			indexedTriangle2D{old[edge], old[(edge+1)%3], pointIndex}, points, tol)
 	}
 	return triangles, nil
+}
+
+func conformTriangulationPoint2D(triangles []indexedTriangle2D, pointIndex int,
+	protected map[[2]int]bool, points []model2d.Coord, tol float64,
+) []indexedTriangle2D {
+	point := points[pointIndex]
+	for attempts := 0; attempts <= len(triangles); attempts++ {
+		edgeTriangles := indexedTriangleEdges2D(triangles)
+		bestEdge := [2]int{-1, -1}
+		bestDistance := math.Inf(1)
+		foundExact := false
+		for edge := range edgeTriangles {
+			if edge[0] == pointIndex || edge[1] == pointIndex {
+				continue
+			}
+			start, end := points[edge[0]], points[edge[1]]
+			delta := end.Sub(start)
+			lengthSquared := delta.NormSquared()
+			if lengthSquared == 0 {
+				continue
+			}
+			parameter := point.Sub(start).Dot(delta) / lengthSquared
+			if parameter <= 0 || parameter >= 1 {
+				continue
+			}
+			exact := exactOrient2DSign(start, end, point) == 0
+			distance := math.Abs(cross2D(delta, point.Sub(start))) / math.Sqrt(lengthSquared)
+			if exact && (!foundExact || edge[0] < bestEdge[0] ||
+				edge[0] == bestEdge[0] && edge[1] < bestEdge[1]) {
+				bestEdge, bestDistance = edge, distance
+				foundExact = true
+			} else if !foundExact && distance <= tol &&
+				(distance < bestDistance || distance == bestDistance &&
+					(edge[0] < bestEdge[0] || edge[0] == bestEdge[0] && edge[1] < bestEdge[1])) {
+				bestEdge, bestDistance = edge, distance
+			}
+		}
+		if bestEdge[0] < 0 {
+			break
+		}
+
+		incidentSet := map[int]bool{}
+		for _, index := range edgeTriangles[bestEdge] {
+			incidentSet[index] = true
+		}
+		next := make([]indexedTriangle2D, 0, len(triangles)+len(incidentSet))
+		for index, triangle := range triangles {
+			if !incidentSet[index] {
+				next = append(next, triangle)
+				continue
+			}
+			other := triangleOtherVertex2D(triangle, bestEdge[0], bestEdge[1])
+			if other == pointIndex {
+				continue
+			}
+			next = appendIndexedTriangle2D(next,
+				indexedTriangle2D{bestEdge[0], pointIndex, other}, points, tol)
+			next = appendIndexedTriangle2D(next,
+				indexedTriangle2D{pointIndex, bestEdge[1], other}, points, tol)
+		}
+		if protected[bestEdge] {
+			delete(protected, bestEdge)
+			protected[orderedEdge2D(bestEdge[0], pointIndex)] = true
+			protected[orderedEdge2D(pointIndex, bestEdge[1])] = true
+		}
+		triangles = next
+	}
+	return triangles
 }
 
 func insertConstraintCavity2D(triangles []indexedTriangle2D, target [2]int,
@@ -1545,6 +1644,7 @@ func finalizeTriangles(options Options3D, raw []model3d.Triangle, tol float64,
 		triCopy := tri
 		result.Add(&triCopy)
 	}
+	result = reduceTriangleIncidenceDefects(result)
 	result, err := separateContactEdges(options, result, tol)
 	if err != nil {
 		return nil, err
@@ -1552,6 +1652,79 @@ func finalizeTriangles(options Options3D, raw []model3d.Triangle, tol float64,
 	result = separateContactComponents(result, tol)
 	result = separateSingularVertexFans(result, tol)
 	return validateResultTopology(result)
+}
+
+// reduceTriangleIncidenceDefects removes surface fragments only when doing so
+// strictly reduces the mesh's total edge-incidence distance from a closed
+// two-manifold. This handles numerically collapsed arrangement cells without
+// imposing a geometric size threshold, which would erase legitimate thin
+// features.
+func reduceTriangleIncidenceDefects(mesh *model3d.Mesh) *model3d.Mesh {
+	triangles := sortedTriangles(mesh)
+	edgeCounts := map[model3d.Segment]int{}
+	edgeTriangles := map[model3d.Segment][]*model3d.Triangle{}
+	for _, triangle := range triangles {
+		for i := range triangle {
+			edge := model3d.NewSegment(triangle[i], triangle[(i+1)%3])
+			edgeCounts[edge]++
+			edgeTriangles[edge] = append(edgeTriangles[edge], triangle)
+		}
+	}
+	edgeDefect := func(count int) int {
+		if count == 0 || count == 2 {
+			return 0
+		}
+		if count < 2 {
+			return 2 - count
+		}
+		return count - 2
+	}
+	removalImprovement := func(triangle *model3d.Triangle) int {
+		improvement := 0
+		for i := range triangle {
+			count := edgeCounts[model3d.NewSegment(triangle[i], triangle[(i+1)%3])]
+			improvement += edgeDefect(count) - edgeDefect(count-1)
+		}
+		return improvement
+	}
+	queue := make([]*model3d.Triangle, 0, len(triangles))
+	queued := map[*model3d.Triangle]bool{}
+	removed := map[*model3d.Triangle]bool{}
+	for _, triangle := range triangles {
+		if removalImprovement(triangle) > 0 {
+			queue = append(queue, triangle)
+			queued[triangle] = true
+		}
+	}
+	for len(queue) != 0 {
+		triangle := queue[0]
+		queue = queue[1:]
+		queued[triangle] = false
+		if removed[triangle] || removalImprovement(triangle) <= 0 {
+			continue
+		}
+		removed[triangle] = true
+		for i := range triangle {
+			edge := model3d.NewSegment(triangle[i], triangle[(i+1)%3])
+			edgeCounts[edge]--
+			for _, neighbor := range edgeTriangles[edge] {
+				if !removed[neighbor] && !queued[neighbor] {
+					queue = append(queue, neighbor)
+					queued[neighbor] = true
+				}
+			}
+		}
+	}
+	if len(removed) == 0 {
+		return mesh
+	}
+	result := model3d.NewMesh()
+	for _, triangle := range triangles {
+		if !removed[triangle] {
+			result.Add(triangle)
+		}
+	}
+	return result
 }
 
 func validateResultTopology(mesh *model3d.Mesh) (*model3d.Mesh, error) {
