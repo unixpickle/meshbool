@@ -1,6 +1,7 @@
 package meshbool
 
 import (
+	"errors"
 	"fmt"
 	"math"
 	"math/rand"
@@ -1043,6 +1044,41 @@ func TestOptions3D(t *testing.T) {
 	complexity, ok = err.(*ComplexityError)
 	if result != nil || !ok || complexity.Stage != "planar input segments" {
 		t.Fatalf("planar limit was not propagated: result=%v err=%#v", result, err)
+	}
+}
+
+func TestKeepInvalidOutput3D(t *testing.T) {
+	// Each box is manifold on its own, but combining overlapping closed shells
+	// in one input creates a self-intersecting surface. Union with a disjoint
+	// box carries those intersections into the completed output candidate.
+	invalidInput := model3d.NewMesh()
+	invalidInput.AddMesh(model3d.NewMeshRect(model3d.Coord3D{}, model3d.Ones(2)))
+	invalidInput.AddMesh(model3d.NewMeshRect(model3d.Ones(1), model3d.Ones(3)))
+	disjoint := model3d.NewMeshRect(model3d.Ones(5), model3d.Ones(6))
+
+	result, err := Union3D(DefaultOptions3D(), invalidInput, disjoint)
+	var topologyErr *TopologyError
+	if result != nil || !errors.As(err, &topologyErr) {
+		t.Fatalf("default behavior returned result=%v err=%v", result, err)
+	}
+
+	options := DefaultOptions3D()
+	options.KeepInvalidOutput = true
+	result, err = Union3D(options, invalidInput, disjoint)
+	if result == nil || !errors.As(err, &topologyErr) {
+		t.Fatalf("opt-in behavior returned result=%v err=%v", result, err)
+	}
+	if intersections, exactErr := exactSelfIntersections(result); exactErr != nil || intersections == 0 {
+		t.Fatalf("kept candidate intersections=%d err=%v", intersections, exactErr)
+	}
+
+	// Resource-limit errors happen before a complete output exists and must not
+	// return the previous input mesh as though it were a candidate result.
+	options.MaxInputTriangles = 1
+	result, err = Union3D(options, invalidInput, disjoint)
+	var complexityErr *ComplexityError
+	if result != nil || !errors.As(err, &complexityErr) {
+		t.Fatalf("complexity failure returned result=%v err=%v", result, err)
 	}
 }
 

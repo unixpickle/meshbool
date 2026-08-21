@@ -34,6 +34,12 @@ type Options3D struct {
 	MaxContactEdgeTriangles   int
 	MaxTriangleCandidatePairs int
 	PlanarOptions             Options2D
+
+	// KeepInvalidOutput returns a completed candidate mesh together with a
+	// *TopologyError when final output validation fails. It does not return
+	// incomplete meshes for failures earlier in the operation. The default is
+	// false, which discards invalid output.
+	KeepInvalidOutput bool
 }
 
 // DefaultOptions3D returns the standard limits for 3-D operations.
@@ -97,8 +103,10 @@ func (c *ComplexityError) Error() string {
 	return fmt.Sprintf("meshbool: %s exceeds safety limit of %d", c.Stage, c.Limit)
 }
 
-// TopologyError indicates that numerical degeneracy prevented construction of
-// a closed, manifold, orientable, and self-intersection-free result.
+// TopologyError indicates that the output could not be verified as closed,
+// manifold, orientable, and self-intersection-free. When KeepInvalidOutput is
+// enabled, the operation may return the invalid candidate together with this
+// error.
 type TopologyError struct {
 	Problem string
 	Count   int
@@ -131,11 +139,11 @@ func union3D(options Options3D, meshes ...*model3d.Mesh) (*model3d.Mesh, error) 
 	}
 	result := meshes[0].DeepCopy()
 	for _, mesh := range meshes[1:] {
-		var err error
-		result, err = booleanMeshPair(options, result, mesh, meshUnion)
+		next, err := booleanMeshPair(options, result, mesh, meshUnion)
 		if err != nil {
-			return nil, err
+			return optionalInvalidOutput(options, next, err)
 		}
+		result = next
 	}
 	return result, nil
 }
@@ -161,11 +169,11 @@ func intersection3D(options Options3D, meshes ...*model3d.Mesh) (*model3d.Mesh, 
 	}
 	result := meshes[0].DeepCopy()
 	for _, mesh := range meshes[1:] {
-		var err error
-		result, err = booleanMeshPair(options, result, mesh, meshIntersection)
+		next, err := booleanMeshPair(options, result, mesh, meshIntersection)
 		if err != nil {
-			return nil, err
+			return optionalInvalidOutput(options, next, err)
 		}
+		result = next
 		if result.NumTriangles() == 0 {
 			break
 		}
@@ -195,16 +203,24 @@ func difference3D(options Options3D, first *model3d.Mesh, subtract ...*model3d.M
 	}
 	result := first.DeepCopy()
 	for _, mesh := range meshes[1:] {
-		var err error
-		result, err = booleanMeshPair(options, result, mesh, meshDifference)
+		next, err := booleanMeshPair(options, result, mesh, meshDifference)
 		if err != nil {
-			return nil, err
+			return optionalInvalidOutput(options, next, err)
 		}
+		result = next
 		if result.NumTriangles() == 0 {
 			break
 		}
 	}
 	return result, nil
+}
+
+func optionalInvalidOutput(options Options3D, result *model3d.Mesh, err error) (*model3d.Mesh, error) {
+	var topologyErr *TopologyError
+	if options.KeepInvalidOutput && result != nil && errors.As(err, &topologyErr) {
+		return result, err
+	}
+	return nil, err
 }
 
 func checkComplexity(stage string, count, limit int) error {
@@ -270,10 +286,10 @@ func booleanMeshPair(options Options3D, a, b *model3d.Mesh, kind meshBooleanKind
 		localA := a.Translate(center.Scale(-1))
 		localB := b.Translate(center.Scale(-1))
 		result, err := booleanMeshPairLocal(options, localA, localB, kind)
-		if err != nil {
-			return nil, err
+		if result != nil {
+			result = result.Translate(center)
 		}
-		return result.Translate(center), nil
+		return result, err
 	}
 	return booleanMeshPairLocal(options, a, b, kind)
 }
@@ -285,6 +301,8 @@ func booleanMeshPairLocal(options Options3D, a, b *model3d.Mesh, kind meshBoolea
 	// tolerance so that the cell remains explicit. The retry also uses a
 	// dominant-axis containment predicate that stays stable on skinny cells.
 	var lastErr error
+	var invalidResult *model3d.Mesh
+	var invalidResultErr error
 	for _, attempt := range []struct {
 		relativeTolerance float64
 		robustConformance bool
@@ -298,10 +316,16 @@ func booleanMeshPairLocal(options Options3D, a, b *model3d.Mesh, kind meshBoolea
 			return result, nil
 		}
 		lastErr = err
+		if result != nil {
+			invalidResult, invalidResultErr = result, err
+		}
 		var topologyErr *TopologyError
 		if !errors.As(err, &topologyErr) {
 			return nil, err
 		}
+	}
+	if invalidResult != nil {
+		return invalidResult, invalidResultErr
 	}
 	return nil, lastErr
 }
@@ -1744,20 +1768,20 @@ func validateResultTopology(mesh *model3d.Mesh) (*model3d.Mesh, error) {
 				badEdges++
 			}
 		}
-		return nil, &TopologyError{Problem: "edges do not each have two incident triangles", Count: badEdges}
+		return mesh, &TopologyError{Problem: "edges do not each have two incident triangles", Count: badEdges}
 	}
 	if singular := mesh.SingularVertices(); len(singular) != 0 {
-		return nil, &TopologyError{Problem: "singular vertices", Count: len(singular)}
+		return mesh, &TopologyError{Problem: "singular vertices", Count: len(singular)}
 	}
 	if !mesh.Orientable() {
-		return nil, &TopologyError{Problem: "non-orientable surface"}
+		return mesh, &TopologyError{Problem: "non-orientable surface"}
 	}
 	intersections, err := exactSelfIntersections(mesh)
 	if err != nil {
 		return nil, err
 	}
 	if intersections != 0 {
-		return nil, &TopologyError{Problem: "self-intersections", Count: intersections}
+		return mesh, &TopologyError{Problem: "self-intersections", Count: intersections}
 	}
 	return mesh, nil
 }

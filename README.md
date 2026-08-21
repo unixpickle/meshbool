@@ -41,11 +41,12 @@ The root package provides `Union2D`, `Intersection2D`, and `Difference2D` for
 `*model2d.Mesh` values, and the corresponding `*3D` functions for
 `*model3d.Mesh` values.
 
-Inputs should be closed, consistently oriented manifold meshes. The operations
-do not mutate them. Outputs are welded, conformingly triangulated, consistently
-oriented, and regularized to remove surface fragments that cannot bound a
-volume. Exact point-only contact is intrinsically non-manifold, so both APIs
-separate contacting components by a few scale-relative tolerance units.
+Inputs should be closed, consistently oriented, self-intersection-free manifold
+meshes. The operations do not mutate them. Outputs are welded, conformingly
+triangulated, consistently oriented, and regularized to remove surface
+fragments that cannot bound a volume. Exact point-only contact is intrinsically
+non-manifold, so both APIs separate contacting components by a few
+scale-relative tolerance units.
 
 ## Resource limits
 
@@ -70,6 +71,24 @@ options.MaxOutputTriangles = 500_000
 
 result, err := meshbool.Union3D(options, a, b)
 ```
+
+By default, an output that fails topology validation is discarded. Diagnostic
+tools can opt to retain the completed candidate mesh while still receiving the
+`*meshbool.TopologyError`:
+
+```go
+options := meshbool.DefaultOptions3D()
+options.KeepInvalidOutput = true
+
+result, err := meshbool.Union3D(options, a, b)
+if err != nil && result != nil {
+    // Inspect or export result, but do not treat it as a valid solid.
+}
+```
+
+This option applies only after a complete candidate reaches final topology
+validation. Complexity limits and earlier construction failures still return a
+nil mesh.
 
 Zero-valued option fields inherit defaults; negative values are rejected. The
 3-D `PlanarOptions` field configures the 2-D work used to merge coplanar
