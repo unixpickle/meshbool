@@ -376,6 +376,75 @@ func TestInsertConstraintCavity2DFrogRegression(t *testing.T) {
 	}
 }
 
+func TestInsertConstraintCavity2DMixedCrossings(t *testing.T) {
+	// The target crosses the first vertical edge 1e-6 from its endpoint and
+	// later crosses ordinary edges. A tolerance-aware cavity sees only the
+	// ordinary crossings, truncating the cavity before the target's left end.
+	points := []model2d.Coord{
+		model2d.XY(0, 0), model2d.XY(3, 0),
+		model2d.XY(0, 1), model2d.XY(0, -1),
+		model2d.XY(1, 1e-6), model2d.XY(1, -1),
+		model2d.XY(2, 1), model2d.XY(2, -1),
+		model2d.XY(3, 1), model2d.XY(3, -1),
+	}
+	triangles := []indexedTriangle2D{
+		{2, 0, 4}, {0, 5, 4}, {0, 3, 5},
+		{4, 5, 6}, {5, 7, 6},
+		{6, 7, 1}, {6, 1, 8}, {7, 9, 1},
+	}
+	for i, triangle := range triangles {
+		triangles[i] = orientedTriangle2D(triangle, points)
+	}
+	target := orderedEdge2D(0, 1)
+	result, err := insertConstraintCavity2D(triangles, target, nil, points, 1e-3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := indexedTriangleEdges2D(result)[target]; !ok {
+		t.Fatal("reconstructed cavity does not contain the target edge")
+	}
+}
+
+func TestInsertConstraintCavity2DPreservesInteriorVertex(t *testing.T) {
+	// Captured from a projected intersection with the rotated text extrusion
+	// in the wedge regression. The constraint cavity surrounds vertex 8 even
+	// though the constraint does not contain it, so retriangulation must put it
+	// back rather than orphaning a later constraint endpoint.
+	points := []model2d.Coord{
+		model2d.XY(0, 0),
+		model2d.XY(0.1970875988999883, 0.5498217822493884),
+		model2d.XY(0.19702950919565831, 0.5499182695641694),
+		model2d.XY(0.19197548553267538, 0.5583130303519102),
+		model2d.XY(0.19075528758672147, 0.5603839991101097),
+		model2d.XY(0.1481901337804121, 0.4118780526163836),
+		model2d.XY(0.14117150923714106, 0.4237903429155481),
+		model2d.XY(0.14780510955563841, 0.41080792045667514),
+		model2d.XY(0.14699391767961414, 0.4108079204566751),
+		model2d.XY(0.13684685153148282, 0.41080792045667514),
+	}
+	triangles := []indexedTriangle2D{
+		{9, 0, 4}, {4, 6, 9}, {0, 7, 1}, {7, 5, 1}, {0, 1, 2},
+		{0, 3, 4}, {0, 2, 8}, {2, 3, 8}, {3, 0, 8},
+	}
+	target := orderedEdge2D(5, 6)
+	result, err := insertConstraintCavity2D(triangles, target, nil, points, 3e-12)
+	if err != nil {
+		t.Fatal(err)
+	}
+	edges := indexedTriangleEdges2D(result)
+	if _, ok := edges[target]; !ok {
+		t.Fatal("reconstructed cavity does not contain the target edge")
+	}
+	for _, triangle := range result {
+		for _, vertex := range triangle {
+			if vertex == 8 {
+				return
+			}
+		}
+	}
+	t.Fatal("cavity reconstruction discarded an interior vertex")
+}
+
 func TestRandomDualContourBooleans(t *testing.T) {
 	const trials = 18
 	rng := rand.New(rand.NewSource(0x5eedc0de))

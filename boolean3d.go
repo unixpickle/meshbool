@@ -643,71 +643,10 @@ func constrainedTriangleFaces(triangle []model2d.Coord, cuts [][2]model2d.Coord,
 
 	triangles := []indexedTriangle2D{orientedTriangle2D(indexedTriangle2D{0, 1, 2}, points)}
 	for pointIndex := 3; pointIndex < len(points); pointIndex++ {
-		point := points[pointIndex]
-		type edgeKey struct{ a, b int }
-		edgeTriangles := map[edgeKey][]int{}
-		for triangleIndex, tri := range triangles {
-			for edge := 0; edge < 3; edge++ {
-				a, b := tri[edge], tri[(edge+1)%3]
-				if a > b {
-					a, b = b, a
-				}
-				edgeTriangles[edgeKey{a, b}] = append(edgeTriangles[edgeKey{a, b}], triangleIndex)
-			}
-		}
-		splitEdge := edgeKey{-1, -1}
-		bestDistance := math.Inf(1)
-		for edge := range edgeTriangles {
-			start, end := points[edge.a], points[edge.b]
-			delta := end.Sub(start)
-			lengthSquared := delta.NormSquared()
-			if lengthSquared == 0 {
-				continue
-			}
-			parameter := point.Sub(start).Dot(delta) / lengthSquared
-			if parameter <= 0 || parameter >= 1 {
-				continue
-			}
-			distance := start.Add(delta.Scale(parameter)).Dist(point)
-			if distance <= tol && distance < bestDistance {
-				splitEdge, bestDistance = edge, distance
-			}
-		}
-		if splitEdge.a >= 0 {
-			incidentSet := map[int]bool{}
-			for _, index := range edgeTriangles[splitEdge] {
-				incidentSet[index] = true
-			}
-			var next []indexedTriangle2D
-			for index, tri := range triangles {
-				if !incidentSet[index] {
-					next = append(next, tri)
-					continue
-				}
-				other := triangleOtherVertex2D(tri, splitEdge.a, splitEdge.b)
-				next = appendIndexedTriangle2D(next,
-					indexedTriangle2D{splitEdge.a, pointIndex, other}, points, tol)
-				next = appendIndexedTriangle2D(next,
-					indexedTriangle2D{pointIndex, splitEdge.b, other}, points, tol)
-			}
-			triangles = next
-			continue
-		}
-		containing := -1
-		for index, tri := range triangles {
-			if pointInIndexedTriangle2D(point, tri, points, tol) {
-				containing = index
-				break
-			}
-		}
-		if containing < 0 {
-			return nil, &TopologyError{Problem: "intersection node outside source triangle"}
-		}
-		old := triangles[containing]
-		triangles = append(triangles[:containing], triangles[containing+1:]...)
-		for edge := 0; edge < 3; edge++ {
-			triangles = appendIndexedTriangle2D(triangles,
-				indexedTriangle2D{old[edge], old[(edge+1)%3], pointIndex}, points, tol)
+		var err error
+		triangles, err = insertTriangulationPoint2D(triangles, pointIndex, points, tol)
+		if err != nil {
+			return nil, err
 		}
 	}
 
@@ -799,29 +738,86 @@ func constrainedTriangleFaces(triangle []model2d.Coord, cuts [][2]model2d.Coord,
 	return result, nil
 }
 
+func insertTriangulationPoint2D(triangles []indexedTriangle2D, pointIndex int,
+	points []model2d.Coord, tol float64) ([]indexedTriangle2D, error) {
+	point := points[pointIndex]
+	edgeTriangles := indexedTriangleEdges2D(triangles)
+	splitEdge := [2]int{-1, -1}
+	bestDistance := math.Inf(1)
+	for edge := range edgeTriangles {
+		start, end := points[edge[0]], points[edge[1]]
+		delta := end.Sub(start)
+		lengthSquared := delta.NormSquared()
+		if lengthSquared == 0 {
+			continue
+		}
+		parameter := point.Sub(start).Dot(delta) / lengthSquared
+		if parameter <= 0 || parameter >= 1 {
+			continue
+		}
+		distance := start.Add(delta.Scale(parameter)).Dist(point)
+		if distance <= tol && distance < bestDistance {
+			splitEdge, bestDistance = edge, distance
+		}
+	}
+	if splitEdge[0] >= 0 {
+		incidentSet := map[int]bool{}
+		for _, index := range edgeTriangles[splitEdge] {
+			incidentSet[index] = true
+		}
+		next := make([]indexedTriangle2D, 0, len(triangles)+len(incidentSet))
+		for index, triangle := range triangles {
+			if !incidentSet[index] {
+				next = append(next, triangle)
+				continue
+			}
+			other := triangleOtherVertex2D(triangle, splitEdge[0], splitEdge[1])
+			next = appendIndexedTriangle2D(next,
+				indexedTriangle2D{splitEdge[0], pointIndex, other}, points, tol)
+			next = appendIndexedTriangle2D(next,
+				indexedTriangle2D{pointIndex, splitEdge[1], other}, points, tol)
+		}
+		return next, nil
+	}
+
+	containing := -1
+	for index, triangle := range triangles {
+		if pointInIndexedTriangle2D(point, triangle, points, tol) {
+			containing = index
+			break
+		}
+	}
+	if containing < 0 {
+		return nil, &TopologyError{Problem: "intersection node outside source triangle"}
+	}
+	old := triangles[containing]
+	triangles = append(triangles[:containing], triangles[containing+1:]...)
+	for edge := 0; edge < 3; edge++ {
+		triangles = appendIndexedTriangle2D(triangles,
+			indexedTriangle2D{old[edge], old[(edge+1)%3], pointIndex}, points, tol)
+	}
+	return triangles, nil
+}
+
 func insertConstraintCavity2D(triangles []indexedTriangle2D, target [2]int,
 	protected map[[2]int]bool, points []model2d.Coord, tol float64,
 ) ([]indexedTriangle2D, error) {
 	edges := indexedTriangleEdges2D(triangles)
 	removed := map[int]bool{}
-	for _, intersectionFn := range []func(model2d.Coord, model2d.Coord,
-		model2d.Coord, model2d.Coord, float64) bool{
-		segmentsProperlyIntersect2D, segmentsProperlyIntersect2DExact,
-	} {
-		for edge, incident := range edges {
-			if !intersectionFn(points[target[0]], points[target[1]],
-				points[edge[0]], points[edge[1]], tol) {
-				continue
-			}
-			if protected[edge] {
-				return nil, &TopologyError{Problem: "intersecting triangle constraints"}
-			}
-			for _, triangleIndex := range incident {
-				removed[triangleIndex] = true
-			}
+	// This is already the slow fallback after edge flipping fails. Use exact
+	// signs for every crossing: a tolerance-aware pass can see ordinary
+	// crossings in the middle while omitting one close to an endpoint, which
+	// leaves that endpoint outside the reconstructed cavity boundary.
+	for edge, incident := range edges {
+		if !segmentsProperlyIntersect2DExact(points[target[0]], points[target[1]],
+			points[edge[0]], points[edge[1]], tol) {
+			continue
 		}
-		if len(removed) != 0 {
-			break
+		if protected[edge] {
+			return nil, &TopologyError{Problem: "intersecting triangle constraints"}
+		}
+		for _, triangleIndex := range incident {
+			removed[triangleIndex] = true
 		}
 	}
 	if len(removed) == 0 {
@@ -829,8 +825,12 @@ func insertConstraintCavity2D(triangles []indexedTriangle2D, target [2]int,
 	}
 
 	boundaryCounts := map[[2]int]int{}
+	removedVertices := map[int]bool{}
 	for triangleIndex := range removed {
 		triangle := triangles[triangleIndex]
+		for _, vertex := range triangle {
+			removedVertices[vertex] = true
+		}
 		for edge := 0; edge < 3; edge++ {
 			boundaryCounts[orderedEdge2D(triangle[edge], triangle[(edge+1)%3])]++
 		}
@@ -892,6 +892,25 @@ func insertConstraintCavity2D(triangles []indexedTriangle2D, target [2]int,
 			return nil, err
 		}
 		result = append(result, triangulated...)
+	}
+	usedVertices := map[int]bool{}
+	for _, triangle := range result {
+		for _, vertex := range triangle {
+			usedVertices[vertex] = true
+		}
+	}
+	var missingVertices []int
+	for vertex := range removedVertices {
+		if !usedVertices[vertex] {
+			missingVertices = append(missingVertices, vertex)
+		}
+	}
+	sort.Ints(missingVertices)
+	for _, vertex := range missingVertices {
+		result, err = insertTriangulationPoint2D(result, vertex, points, tol)
+		if err != nil {
+			return nil, err
+		}
 	}
 	resultEdges := indexedTriangleEdges2D(result)
 	if _, ok := resultEdges[target]; !ok {
