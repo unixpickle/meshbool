@@ -786,6 +786,42 @@ func TestThinOverlap3D(t *testing.T) {
 	}
 }
 
+func TestSparseLocalDifference3D(t *testing.T) {
+	// Most source triangles are far outside the cutter bounds and can pass
+	// through unchanged. The cutter still crosses the surface, exercising the
+	// active one-ring interface between processed and passthrough triangles.
+	sphere := model3d.NewMeshIcosphere(model3d.Coord3D{}, 1, 3)
+	cutter := model3d.NewMeshRect(
+		model3d.XYZ(0.8, -0.15, -0.15), model3d.XYZ(1.1, 0.15, 0.15),
+	)
+	result, err := Difference3D(DefaultOptions3D(), sphere, cutter)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertValidMesh3D(t, result)
+	if result.Volume() <= 0 || result.Volume() >= sphere.Volume() {
+		t.Fatalf("difference volume %g is not between zero and input volume %g",
+			result.Volume(), sphere.Volume())
+	}
+}
+
+func TestUnrelatedTrianglesDoNotCreateRelations(t *testing.T) {
+	a := model3d.NewMeshRect(model3d.Coord3D{}, model3d.Ones(1))
+	b := model3d.NewMeshRect(model3d.Ones(3), model3d.Ones(4))
+	trianglesA, trianglesB := sortedTriangles(a), sortedTriangles(b)
+	candidatePairs := 0
+	relationsA, relationsB, err := buildTriangleRelations(
+		DefaultOptions3D(), trianglesA, newTriangleIndex(trianglesB), 1e-12, &candidatePairs,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if candidatePairs != 0 || len(relationsA) != 0 || len(relationsB) != 0 {
+		t.Fatalf("unrelated meshes produced candidates=%d relations=%d,%d",
+			candidatePairs, len(relationsA), len(relationsB))
+	}
+}
+
 func TestDifferenceNearCoincidentIcospheres(t *testing.T) {
 	base := model3d.NewMeshIcosphere(model3d.Coord3D{}, 1, 1).Scale(0.0625)
 	shift := model3d.XYZ(-1.5702306801199588e-11, -2.391969238598219e-10, 5.772029705200064e-10)

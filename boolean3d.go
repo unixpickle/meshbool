@@ -137,7 +137,10 @@ func union3D(options Options3D, meshes ...*model3d.Mesh) (*model3d.Mesh, error) 
 	if err := checkInputMeshes(options, meshes); err != nil {
 		return nil, err
 	}
-	result := meshes[0].DeepCopy()
+	if len(meshes) == 1 {
+		return meshes[0].DeepCopy(), nil
+	}
+	result := meshes[0]
 	for _, mesh := range meshes[1:] {
 		next, err := booleanMeshPair(options, result, mesh, meshUnion)
 		if err != nil {
@@ -167,7 +170,10 @@ func intersection3D(options Options3D, meshes ...*model3d.Mesh) (*model3d.Mesh, 
 	if err := checkInputMeshes(options, meshes); err != nil {
 		return nil, err
 	}
-	result := meshes[0].DeepCopy()
+	if len(meshes) == 1 {
+		return meshes[0].DeepCopy(), nil
+	}
+	result := meshes[0]
 	for _, mesh := range meshes[1:] {
 		next, err := booleanMeshPair(options, result, mesh, meshIntersection)
 		if err != nil {
@@ -201,7 +207,10 @@ func difference3D(options Options3D, first *model3d.Mesh, subtract ...*model3d.M
 	if err := checkInputMeshes(options, meshes); err != nil {
 		return nil, err
 	}
-	result := first.DeepCopy()
+	if len(meshes) == 1 {
+		return first.DeepCopy(), nil
+	}
+	result := first
 	for _, mesh := range meshes[1:] {
 		next, err := booleanMeshPair(options, result, mesh, meshDifference)
 		if err != nil {
@@ -350,25 +359,32 @@ func booleanMeshPairLocalTolerance(options Options3D, a, b *model3d.Mesh,
 		return nil, err
 	}
 	var fragments []*polygon
+	passthroughCapacity := options.MaxTotalFragments
+	if len(trianglesA) <= passthroughCapacity && len(trianglesB) <= passthroughCapacity-len(trianglesA) {
+		passthroughCapacity = len(trianglesA) + len(trianglesB)
+	}
+	passthrough := make([]model3d.Triangle, 0, passthroughCapacity)
 	newFragments, err := splitAndClassifyMesh(
-		options, trianglesA, relationsA, classifierA, classifierB, kind, tol, true)
+		options, trianglesA, relationsA, classifierA, classifierB, kind, tol, true, &passthrough)
 	if err != nil {
 		return nil, err
 	}
 	fragments = append(fragments, newFragments...)
-	if err := checkComplexity("surface fragments", len(fragments), options.MaxTotalFragments); err != nil {
+	if err := checkComplexity("surface fragments", len(fragments)+len(passthrough),
+		options.MaxTotalFragments); err != nil {
 		return nil, err
 	}
 	newFragments, err = splitAndClassifyMesh(
-		options, trianglesB, relationsB, classifierA, classifierB, kind, tol, false)
+		options, trianglesB, relationsB, classifierA, classifierB, kind, tol, false, &passthrough)
 	if err != nil {
 		return nil, err
 	}
 	fragments = append(fragments, newFragments...)
-	if err := checkComplexity("surface fragments", len(fragments), options.MaxTotalFragments); err != nil {
+	if err := checkComplexity("surface fragments", len(fragments)+len(passthrough),
+		options.MaxTotalFragments); err != nil {
 		return nil, err
 	}
-	return polygonsMesh(options, fragments, tol, robustConformance)
+	return polygonsMesh(options, fragments, passthrough, tol, robustConformance)
 }
 
 type triangleRelation struct {
@@ -395,6 +411,9 @@ func buildTriangleRelations(options Options3D, trianglesA []*model3d.Triangle,
 		if err := checkComplexity("triangle candidate pairs", *candidatePairs,
 			options.MaxTriangleCandidatePairs); err != nil {
 			return nil, nil, err
+		}
+		if len(nearby) == 0 {
+			continue
 		}
 		relationA := &triangleRelation{}
 		resultA[triangleA] = relationA
@@ -425,8 +444,26 @@ func buildTriangleRelations(options Options3D, trianglesA []*model3d.Triangle,
 
 func splitAndClassifyMesh(options Options3D, triangles []*model3d.Triangle,
 	relations map[*model3d.Triangle]*triangleRelation, classifierA, classifierB *exactMeshClassifier,
-	kind meshBooleanKind, tol float64, sourceA bool) ([]*polygon, error) {
+	kind meshBooleanKind, tol float64, sourceA bool, passthrough *[]model3d.Triangle,
+) ([]*polygon, error) {
 	var result []*polygon
+	otherClassifier := classifierA
+	if sourceA {
+		otherClassifier = classifierB
+	}
+	// Include a one-vertex halo around every potentially affected triangle.
+	// This keeps the interface with passthrough triangles on untouched source
+	// edges even when tolerance canonicalization moves a nearby arrangement
+	// node onto a source vertex.
+	activeVertices := map[model3d.Coord3D]bool{}
+	for _, triangle := range triangles {
+		_, related := relations[triangle]
+		if related || !triangleOutsideClassifierBounds(triangle, otherClassifier, tol) {
+			for _, point := range triangle {
+				activeVertices[point] = true
+			}
+		}
+	}
 	for _, tri := range triangles {
 		if tri.Area() <= tol*tol {
 			continue
@@ -434,7 +471,28 @@ func splitAndClassifyMesh(options Options3D, triangles []*model3d.Triangle,
 		normal := tri.Normal()
 		u, v := planeBasis(normal)
 		origin := tri[0]
-		relation := relations[tri]
+		relation, related := relations[tri]
+		sharesActiveVertex := false
+		for _, point := range tri {
+			if activeVertices[point] {
+				sharesActiveVertex = true
+				break
+			}
+		}
+		if !related && !sharesActiveVertex && triangleOutsideClassifierBounds(tri, otherClassifier, tol) {
+			keep, flip, err := selectSourceSurface(kind, sourceA, false)
+			if err != nil {
+				return nil, err
+			}
+			if keep {
+				triangle := *tri
+				if flip {
+					triangle[0], triangle[1] = triangle[1], triangle[0]
+				}
+				*passthrough = append(*passthrough, triangle)
+			}
+			continue
+		}
 		if relation == nil {
 			relation = &triangleRelation{}
 		}
@@ -606,6 +664,17 @@ func splitAndClassifyMesh(options Options3D, triangles []*model3d.Triangle,
 		}
 	}
 	return result, nil
+}
+
+func triangleOutsideClassifierBounds(triangle *model3d.Triangle,
+	classifier *exactMeshClassifier, tol float64) bool {
+	if classifier.index == nil {
+		return true
+	}
+	min, max := triangle.Min(), triangle.Max()
+	return max.X < classifier.min.X-tol || min.X > classifier.max.X+tol ||
+		max.Y < classifier.min.Y-tol || min.Y > classifier.max.Y+tol ||
+		max.Z < classifier.min.Z-tol || min.Z > classifier.max.Z+tol
 }
 
 type indexedTriangle2D [3]int
@@ -1431,7 +1500,7 @@ type coplanarGroup struct {
 
 type planeGroupKey [4]int64
 
-func polygonsMesh(options Options3D, polygons []*polygon, tol float64,
+func polygonsMesh(options Options3D, polygons []*polygon, passthrough []model3d.Triangle, tol float64,
 	robustConformance bool) (*model3d.Mesh, error) {
 	var raw []model3d.Triangle
 	var coplanar []*polygon
@@ -1460,7 +1529,7 @@ func polygonsMesh(options Options3D, polygons []*polygon, tol float64,
 		}
 		raw = append(raw, triangles...)
 	}
-	return finalizeTriangles(options, raw, tol, robustConformance)
+	return finalizeTriangles(options, raw, passthrough, tol, robustConformance)
 }
 
 func triangulateCoplanarPolygons(options Options3D, polygons []*polygon,
@@ -1618,9 +1687,9 @@ func triangulatePlanarMesh(mesh *model2d.Mesh) ([][3]model2d.Coord, error) {
 	return model2d.TriangulateMesh(mesh), nil
 }
 
-func finalizeTriangles(options Options3D, raw []model3d.Triangle, tol float64,
+func finalizeTriangles(options Options3D, raw, passthrough []model3d.Triangle, tol float64,
 	robustConformance bool) (*model3d.Mesh, error) {
-	if err := checkComplexity("output triangles", len(raw), options.MaxOutputTriangles); err != nil {
+	if err := checkComplexity("output triangles", len(raw)+len(passthrough), options.MaxOutputTriangles); err != nil {
 		return nil, err
 	}
 	canon := newCoordCanonicalizer(tol)
@@ -1635,7 +1704,8 @@ func finalizeTriangles(options Options3D, raw []model3d.Triangle, tol float64,
 	for _, tri := range raw {
 		conformed = appendConformedTriangle(conformed, tri, index, tol,
 			robustConformance, &pointCandidates)
-		if err := checkComplexity("conforming output triangles", len(conformed), options.MaxOutputTriangles); err != nil {
+		if err := checkComplexity("conforming output triangles", len(conformed)+len(passthrough),
+			options.MaxOutputTriangles); err != nil {
 			return nil, err
 		}
 	}
@@ -1668,7 +1738,18 @@ func finalizeTriangles(options Options3D, raw []model3d.Triangle, tol float64,
 		triCopy := tri
 		result.Add(&triCopy)
 	}
-	result = reduceTriangleIncidenceDefects(result)
+	for i := range passthrough {
+		result.Add(&passthrough[i])
+	}
+	var ordinaryTopology bool
+	result, ordinaryTopology = reduceTriangleIncidenceDefectsWithTopology(result)
+	if ordinaryTopology {
+		// The common case has no contacts to regularize. The edge pass above
+		// already proved that the mesh is closed and consistently oriented, so
+		// avoid rebuilding several whole-mesh adjacency maps—especially costly
+		// for large WebAssembly operations.
+		return validateSelfIntersectionFree(result)
+	}
 	result, err := separateContactEdges(options, result, tol)
 	if err != nil {
 		return nil, err
@@ -1684,13 +1765,40 @@ func finalizeTriangles(options Options3D, raw []model3d.Triangle, tol float64,
 // imposing a geometric size threshold, which would erase legitimate thin
 // features.
 func reduceTriangleIncidenceDefects(mesh *model3d.Mesh) *model3d.Mesh {
-	triangles := sortedTriangles(mesh)
-	edgeCounts := map[model3d.Segment]int{}
+	result, _ := reduceTriangleIncidenceDefectsWithTopology(mesh)
+	return result
+}
+
+type triangleEdgeState struct {
+	count          int
+	direction      int
+	firstTriangle  int
+	secondTriangle int
+}
+
+func reduceTriangleIncidenceDefectsWithTopology(mesh *model3d.Mesh) (*model3d.Mesh, bool) {
+	triangles := mesh.TriangleSlice()
+	edgeStates := buildTriangleEdgeStates(triangles)
+	ordinaryTopology := true
+	for _, state := range edgeStates {
+		if state.count != 2 || state.direction != 0 {
+			ordinaryTopology = false
+			break
+		}
+	}
+	if ordinaryTopology {
+		return mesh, !hasSingularTriangleVertices(triangles, edgeStates)
+	}
+
+	// Removal order affects which local improvement is selected, so rebuild
+	// the uncommon repair case in deterministic triangle order.
+	triangles = sortedTriangles(mesh)
+	edgeStates = buildTriangleEdgeStates(triangles)
+
 	edgeTriangles := map[model3d.Segment][]*model3d.Triangle{}
 	for _, triangle := range triangles {
 		for i := range triangle {
 			edge := model3d.NewSegment(triangle[i], triangle[(i+1)%3])
-			edgeCounts[edge]++
 			edgeTriangles[edge] = append(edgeTriangles[edge], triangle)
 		}
 	}
@@ -1706,7 +1814,7 @@ func reduceTriangleIncidenceDefects(mesh *model3d.Mesh) *model3d.Mesh {
 	removalImprovement := func(triangle *model3d.Triangle) int {
 		improvement := 0
 		for i := range triangle {
-			count := edgeCounts[model3d.NewSegment(triangle[i], triangle[(i+1)%3])]
+			count := edgeStates[model3d.NewSegment(triangle[i], triangle[(i+1)%3])].count
 			improvement += edgeDefect(count) - edgeDefect(count-1)
 		}
 		return improvement
@@ -1730,7 +1838,14 @@ func reduceTriangleIncidenceDefects(mesh *model3d.Mesh) *model3d.Mesh {
 		removed[triangle] = true
 		for i := range triangle {
 			edge := model3d.NewSegment(triangle[i], triangle[(i+1)%3])
-			edgeCounts[edge]--
+			state := edgeStates[edge]
+			state.count--
+			if edge[0] == triangle[i] {
+				state.direction--
+			} else {
+				state.direction++
+			}
+			edgeStates[edge] = state
 			for _, neighbor := range edgeTriangles[edge] {
 				if !removed[neighbor] && !queued[neighbor] {
 					queue = append(queue, neighbor)
@@ -1740,7 +1855,7 @@ func reduceTriangleIncidenceDefects(mesh *model3d.Mesh) *model3d.Mesh {
 		}
 	}
 	if len(removed) == 0 {
-		return mesh
+		return mesh, false
 	}
 	result := model3d.NewMesh()
 	for _, triangle := range triangles {
@@ -1748,7 +1863,91 @@ func reduceTriangleIncidenceDefects(mesh *model3d.Mesh) *model3d.Mesh {
 			result.Add(triangle)
 		}
 	}
-	return result
+	// A repair changes triangle indices, so let the uncommon repair path run
+	// the complete topology checks rather than rebuilding this fast index.
+	return result, false
+}
+
+func buildTriangleEdgeStates(triangles []*model3d.Triangle) map[model3d.Segment]triangleEdgeState {
+	edgeStates := map[model3d.Segment]triangleEdgeState{}
+	for triangleIndex, triangle := range triangles {
+		for i := range triangle {
+			edge := model3d.NewSegment(triangle[i], triangle[(i+1)%3])
+			state := edgeStates[edge]
+			if state.count == 0 {
+				state.firstTriangle = triangleIndex
+			} else if state.count == 1 {
+				state.secondTriangle = triangleIndex
+			}
+			state.count++
+			if edge[0] == triangle[i] {
+				state.direction++
+			} else {
+				state.direction--
+			}
+			edgeStates[edge] = state
+		}
+	}
+	return edgeStates
+}
+
+func hasSingularTriangleVertices(triangles []*model3d.Triangle,
+	edges map[model3d.Segment]triangleEdgeState) bool {
+	// Each triangle corner is a node. Corners at the same endpoint of a shared
+	// edge belong to the same local fan, so unioning them reveals whether one
+	// coordinate participates in multiple disconnected fans.
+	parents := make([]int, 3*len(triangles))
+	for i := range parents {
+		parents[i] = -1
+	}
+	var find func(int) int
+	find = func(index int) int {
+		if parents[index] < 0 {
+			return index
+		}
+		parents[index] = find(parents[index])
+		return parents[index]
+	}
+	union := func(a, b int) {
+		a, b = find(a), find(b)
+		if a == b {
+			return
+		}
+		if parents[a] > parents[b] {
+			a, b = b, a
+		}
+		parents[a] += parents[b]
+		parents[b] = a
+	}
+	corner := func(triangleIndex int, point model3d.Coord3D) int {
+		for vertex, candidate := range triangles[triangleIndex] {
+			if candidate == point {
+				return 3*triangleIndex + vertex
+			}
+		}
+		return -1
+	}
+	for edge, state := range edges {
+		for _, point := range edge {
+			first := corner(state.firstTriangle, point)
+			second := corner(state.secondTriangle, point)
+			if first < 0 || second < 0 {
+				return true
+			}
+			union(first, second)
+		}
+	}
+	vertexFans := map[model3d.Coord3D]int{}
+	for triangleIndex, triangle := range triangles {
+		for vertex, point := range triangle {
+			root := find(3*triangleIndex + vertex)
+			if previous, ok := vertexFans[point]; ok && previous != root {
+				return true
+			}
+			vertexFans[point] = root
+		}
+	}
+	return false
 }
 
 func validateResultTopology(mesh *model3d.Mesh) (*model3d.Mesh, error) {
@@ -1776,6 +1975,10 @@ func validateResultTopology(mesh *model3d.Mesh) (*model3d.Mesh, error) {
 	if !mesh.Orientable() {
 		return mesh, &TopologyError{Problem: "non-orientable surface"}
 	}
+	return validateSelfIntersectionFree(mesh)
+}
+
+func validateSelfIntersectionFree(mesh *model3d.Mesh) (*model3d.Mesh, error) {
 	intersections, err := exactSelfIntersections(mesh)
 	if err != nil {
 		return nil, err
@@ -2691,14 +2894,16 @@ func meshScale(meshes []*model3d.Mesh) float64 {
 	maxAbs := 0.0
 	var min, max model3d.Coord3D
 	for _, mesh := range meshes {
-		mesh.IterateVertices(func(v model3d.Coord3D) {
-			maxAbs = math.Max(maxAbs, v.Abs().MaxCoord())
-			if !initialized {
-				min, max, initialized = v, v, true
-			} else {
-				min, max = min.Min(v), max.Max(v)
-			}
-		})
+		if mesh.NumTriangles() == 0 {
+			continue
+		}
+		meshMin, meshMax := mesh.Min(), mesh.Max()
+		maxAbs = math.Max(maxAbs, math.Max(meshMin.Abs().MaxCoord(), meshMax.Abs().MaxCoord()))
+		if !initialized {
+			min, max, initialized = meshMin, meshMax, true
+		} else {
+			min, max = min.Min(meshMin), max.Max(meshMax)
+		}
 	}
 	if !initialized {
 		return 1
